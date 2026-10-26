@@ -429,7 +429,7 @@ export default function App() {
 
         {esStockManagerOAdmin && (
           <div style={{ background: '#fff', padding: 18, borderRadius: 10, marginBottom: 24, border: '1px solid #e2e8f0' }}>
-            <h3 style={{ marginTop: 0 }}>📦 Cargar Vehículo a Stock Interno</h3>
+            <h3 style={{ marginTop: 0 }}>📦 Cargar Vehículo a Stock Interno.</h3>
             <form onSubmit={handleCreateVehicle} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10 }}>
               <input placeholder="Nro. Referencia" value={newCar.ref_no} onChange={e => setNewCar({...newCar, ref_no: e.target.value})} style={{ padding: 8 }} />
               <input placeholder="Chasis / VIN" value={newCar.vin_chasis} onChange={e => setNewCar({...newCar, vin_chasis: e.target.value})} required style={{ padding: 8 }} />
