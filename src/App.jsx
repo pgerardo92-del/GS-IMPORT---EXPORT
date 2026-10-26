@@ -15,9 +15,26 @@ export default function App() {
   const [authError, setAuthError] = useState('');
 
   const [vehicles, setVehicles] = useState([]);
+  const [filteredVehicles, setFilteredVehicles] = useState([]);
   const [reservations, setReservations] = useState([]);
   const [receipts, setReceipts] = useState([]);
-  const [newCar, setNewCar] = useState({ vin_chasis: '', marca: 'Toyota', modelo: '', anio: 2020, color: '', precio: '', imagen_url: '' });
+
+  const [vistaActual, setVistaActual] = useState('activos');
+  const [orden, setOrden] = useState('recientes');
+  const [selectedVehicleIds, setSelectedVehicleIds] = useState([]);
+
+  const [newCar, setNewCar] = useState({ ref_no: '', vin_chasis: '', marca: 'Toyota', modelo: '', anio: 2020, color: '', precio: '', imagen_url: '' });
+  const [editingCar, setEditingCar] = useState(null);
+  const [extendingResId, setExtendingResId] = useState(null);
+  const [nuevaFechaExt, setNuevaFechaExt] = useState('');
+
+  const [filters, setFilters] = useState({
+    marca: '',
+    modelo: '',
+    anio: '',
+    chasis: '',
+    refNo: ''
+  });
 
   const [selectedCar, setSelectedCar] = useState(null);
   const [selectedCarDetail, setSelectedCarDetail] = useState(null);
@@ -69,6 +86,12 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (session) {
+      loadVehiclesByView(vistaActual);
+    }
+  }, [vistaActual, orden]);
+
   async function fetchProfileAndData(userId, userEmail) {
     setLoading(true);
     const { data: prof } = await supabase.from('profiles').select('*').eq('id', userId).single();
@@ -81,12 +104,40 @@ export default function App() {
   }
 
   async function loadAllData() {
-    const { data: vData } = await supabase.from('vehicles').select('*').order('creado_el', { ascending: false });
-    if (vData) setVehicles(vData);
+    await loadVehiclesByView(vistaActual);
     const { data: rData } = await supabase.from('reservations').select('*, profiles(nombre, email)').order('fecha_inicio', { ascending: false });
     if (rData) setReservations(rData);
     const { data: pData } = await supabase.from('payment_receipts').select('*, profiles!payment_receipts_vendedor_id_fkey(nombre, email)').order('subido_el', { ascending: false });
     if (pData) setReceipts(pData);
+  }
+
+  async function loadVehiclesByView(vista) {
+    let query = supabase.from('vehicles').select('*');
+    
+    if (vista === 'activos') {
+      query = query.neq('estado', 'vendido');
+    } else if (vista === 'vendidos') {
+      query = query.eq('estado', 'vendido');
+    }
+
+    if (orden === 'recientes') {
+      query = query.order('creado_el', { ascending: false });
+    } else if (orden === 'precio_asc') {
+      query = query.order('precio', { ascending: true });
+    } else if (orden === 'precio_desc') {
+      query = query.order('precio', { ascending: false });
+    } else if (orden === 'anio_desc') {
+      query = query.order('anio', { ascending: false });
+    } else if (orden === 'anio_asc') {
+      query = query.order('anio', { ascending: true });
+    }
+
+    const { data: vData } = await query;
+    if (vData) {
+      setVehicles(vData);
+      setFilteredVehicles(vData);
+      setSelectedVehicleIds([]);
+    }
   }
 
   async function checkExpiredReservations(now) {
@@ -112,14 +163,42 @@ export default function App() {
   async function handleCreateVehicle(e) {
     e.preventDefault();
     const { error } = await supabase.from('vehicles').insert([{
-      ...newCar, precio: parseFloat(newCar.precio), anio: parseInt(newCar.anio),
-      estado: 'en_taller_logistica', publicado_para_venta: false, creado_por: profile.id
+      ...newCar, 
+      precio: parseFloat(newCar.precio), 
+      anio: parseInt(newCar.anio),
+      estado: 'en_taller_logistica', 
+      publicado_para_venta: false, 
+      creado_por: profile.id
     }]);
     if (error) alert('Error: ' + error.message);
     else {
-      setNewCar({ vin_chasis: '', marca: 'Toyota', modelo: '', anio: 2020, color: '', precio: '', imagen_url: '' });
+      setNewCar({ ref_no: '', vin_chasis: '', marca: 'Toyota', modelo: '', anio: 2020, color: '', precio: '', imagen_url: '' });
       loadAllData();
       alert('Vehículo guardado en Stock Interno.');
+    }
+  }
+
+  async function handleUpdateVehicle(e) {
+    e.preventDefault();
+    if (!editingCar) return;
+
+    const { error } = await supabase.from('vehicles').update({
+      ref_no: editingCar.ref_no,
+      vin_chasis: editingCar.vin_chasis,
+      marca: editingCar.marca,
+      modelo: editingCar.modelo,
+      anio: parseInt(editingCar.anio),
+      color: editingCar.color,
+      precio: parseFloat(editingCar.precio),
+      imagen_url: editingCar.imagen_url
+    }).eq('id', editingCar.id);
+
+    if (error) {
+      alert('Error al actualizar: ' + error.message);
+    } else {
+      setEditingCar(null);
+      loadAllData();
+      alert('¡Vehículo actualizado con éxito!');
     }
   }
 
@@ -128,9 +207,120 @@ export default function App() {
     loadAllData();
   }
 
+  async function handleDeleteVehicle(carId) {
+    if (!confirm('¿Estás seguro de eliminar esta unidad permanentemente del sistema?')) return;
+    const { error } = await supabase.from('vehicles').delete().eq('id', carId);
+    if (error) {
+      alert('Error al eliminar: ' + error.message);
+    } else {
+      loadAllData();
+      alert('Vehículo eliminado con éxito.');
+    }
+  }
+
+  async function handleSaveExtendedDate(resId) {
+    if (!nuevaFechaExt) return alert('Selecciona una fecha y hora válidas.');
+
+    const { error } = await supabase.from('reservations').update({ 
+      fecha_limite: new Date(nuevaFechaExt).toISOString(), 
+      estado: 'extendida' 
+    }).eq('id', resId);
+
+    if (error) {
+      alert('Error al extender la reserva: ' + error.message);
+    } else {
+      setExtendingResId(null);
+      setNuevaFechaExt('');
+      loadAllData();
+      alert('¡Reserva extendida exitosamente!');
+    }
+  }
+
+  function toggleSelectVehicle(carId) {
+    if (selectedVehicleIds.includes(carId)) {
+      setSelectedVehicleIds(selectedVehicleIds.filter(id => id !== carId));
+    } else {
+      setSelectedVehicleIds([...selectedVehicleIds, carId]);
+    }
+  }
+
+  function handleSelectAll() {
+    if (selectedVehicleIds.length === filteredVehicles.length) {
+      setSelectedVehicleIds([]);
+    } else {
+      setSelectedVehicleIds(filteredVehicles.map(car => car.id));
+    }
+  }
+
+  function handleSearchFilters(e) {
+    if (e) e.preventDefault();
+    const result = vehicles.filter(car => {
+      const matchMarca = filters.marca === '' || (car.marca && car.marca.toLowerCase().includes(filters.marca.toLowerCase()));
+      const matchModelo = filters.modelo === '' || (car.modelo && car.modelo.toLowerCase().includes(filters.modelo.toLowerCase()));
+      const matchAnio = filters.anio === '' || String(car.anio).includes(filters.anio);
+      const matchChasis = filters.chasis === '' || (car.vin_chasis && car.vin_chasis.toLowerCase().includes(filters.chasis.toLowerCase()));
+      const matchRef = filters.refNo === '' || (car.ref_no && String(car.ref_no).toLowerCase().includes(filters.refNo.toLowerCase()));
+
+      return matchMarca && matchModelo && matchAnio && matchChasis && matchRef;
+    });
+    setFilteredVehicles(result);
+    setSelectedVehicleIds([]);
+  }
+
+  function handleResetFilters() {
+    setFilters({ marca: '', modelo: '', anio: '', chasis: '', refNo: '' });
+    setFilteredVehicles(vehicles);
+    setSelectedVehicleIds([]);
+  }
+
+  function exportarAExcel() {
+    const autosAExportar = selectedVehicleIds.length > 0 
+      ? filteredVehicles.filter(car => selectedVehicleIds.includes(car.id))
+      : filteredVehicles;
+
+    if (autosAExportar.length === 0) {
+      return alert('No hay unidades seleccionadas para exportar.');
+    }
+
+    const headers = ['Nro Referencia', 'Chasis / VIN', 'Marca', 'Modelo', 'Anio', 'Color', 'Precio ($)', 'Estado'];
+    
+    const rows = autosAExportar.map(car => [
+      car.ref_no || 'N/D',
+      car.vin_chasis || '',
+      car.marca || '',
+      car.modelo || '',
+      car.anio || '',
+      car.color || '',
+      car.precio || 0,
+      car.estado ? car.estado.toUpperCase() : ''
+    ]);
+
+    let csvContent = '\uFEFF' + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `GS_Import_Seleccion_${vistaActual}_${new Date().toISOString().slice(0,10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }
+
   async function handleCreateReservation(e) {
     e.preventDefault();
     if (!selectedCar) return;
+
+    const yaTuvoReservaCaidaEnEstaUnidad = reservations.some(
+      r => r.vehicle_id === selectedCar.id && 
+           r.vendedor_id === profile.id && 
+           ['vencida', 'cancelada_por_vendedor'].includes(r.estado)
+    );
+
+    if (yaTuvoReservaCaidaEnEstaUnidad) {
+      setSelectedCar(null);
+      return alert('🚫 No puedes volver a reservar esta unidad específica porque ya se te cayó una reserva anterior en la misma.');
+    }
 
     if (profile.penalizado_hasta && new Date(profile.penalizado_hasta) > currentTime) {
       const diffMs = new Date(profile.penalizado_hasta) - currentTime;
@@ -218,6 +408,7 @@ export default function App() {
   const estaCastigado = profile.penalizado_hasta && new Date(profile.penalizado_hasta) > currentTime;
   const userRoleText = getDisplayRole(profile.rol, profile.email);
   const esVendedor = profile.rol === 'vendedor';
+  const esStockManagerOAdmin = profile.rol === 'stock_manager' || profile.rol === 'admin';
 
   return (
     <div style={{ minHeight: '100vh', background: '#f8fafc', fontFamily: 'sans-serif', color: '#0f172a' }}>
@@ -236,10 +427,11 @@ export default function App() {
           </div>
         )}
 
-        {(profile.rol === 'stock_manager' || profile.rol === 'admin') && (
+        {esStockManagerOAdmin && (
           <div style={{ background: '#fff', padding: 18, borderRadius: 10, marginBottom: 24, border: '1px solid #e2e8f0' }}>
             <h3 style={{ marginTop: 0 }}>📦 Cargar Vehículo a Stock Interno</h3>
             <form onSubmit={handleCreateVehicle} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10 }}>
+              <input placeholder="Nro. Referencia" value={newCar.ref_no} onChange={e => setNewCar({...newCar, ref_no: e.target.value})} style={{ padding: 8 }} />
               <input placeholder="Chasis / VIN" value={newCar.vin_chasis} onChange={e => setNewCar({...newCar, vin_chasis: e.target.value})} required style={{ padding: 8 }} />
               <input placeholder="Marca" value={newCar.marca} onChange={e => setNewCar({...newCar, marca: e.target.value})} required style={{ padding: 8 }} />
               <input placeholder="Modelo" value={newCar.modelo} onChange={e => setNewCar({...newCar, modelo: e.target.value})} required style={{ padding: 8 }} />
@@ -252,13 +444,147 @@ export default function App() {
           </div>
         )}
 
-        <h3>🚗 UNIDADES DISPONIBLES PARA VENTA ({vehicles.length})</h3>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
+          <h3 style={{ margin: 0 }}>
+            {vistaActual === 'activos' ? `🚗 UNIDADES ACTIVAS Y DISPONIBLES (${filteredVehicles.length})` : `📁 HISTORIAL DE UNIDADES VENDIDAS (${filteredVehicles.length})`}
+          </h3>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#fff', padding: '4px 8px', borderRadius: 8, border: '1px solid #cbd5e1' }}>
+              <span style={{ fontSize: 12, fontWeight: 'bold', color: '#475569' }}>Ordenar:</span>
+              <select 
+                value={orden} 
+                onChange={e => setOrden(e.target.value)}
+                style={{ border: 'none', background: 'transparent', fontSize: 13, fontWeight: 600, cursor: 'pointer', outline: 'none', color: '#0f172a' }}
+              >
+                <option value="recientes">Más Recientes (Ingreso)</option>
+                <option value="precio_asc">Precio: Más barato a más caro</option>
+                <option value="precio_desc">Precio: Más caro a más barato</option>
+                <option value="anio_desc">Año: Más nuevo (Reciente)</option>
+                <option value="anio_asc">Año: Más antiguo</option>
+              </select>
+            </div>
+
+            <div style={{ display: 'flex', background: '#e2e8f0', padding: 4, borderRadius: 8, gap: 4 }}>
+              <button 
+                onClick={() => setVistaActual('activos')}
+                style={{ padding: '6px 14px', borderRadius: 6, border: 'none', background: vistaActual === 'activos' ? '#0f172a' : 'transparent', color: vistaActual === 'activos' ? '#fff' : '#475569', fontWeight: 600, cursor: 'pointer', fontSize: 13 }}
+              >
+                Disponibles / Stock
+              </button>
+              {profile.rol === 'admin' && (
+                <button 
+                  onClick={() => setVistaActual('vendidos')}
+                  style={{ padding: '6px 14px', borderRadius: 6, border: 'none', background: vistaActual === 'vendidos' ? '#16a34a' : 'transparent', color: vistaActual === 'vendidos' ? '#fff' : '#475569', fontWeight: 600, cursor: 'pointer', fontSize: 13 }}
+                >
+                  📂 Ver Vendidos (Historial)
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div style={{ background: '#1e293b', padding: 16, borderRadius: 10, marginBottom: 20, border: '1px solid #334155' }}>
+          <form onSubmit={handleSearchFilters} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10, marginBottom: 12 }}>
+            <input 
+              placeholder="Nro. Referencia" 
+              value={filters.refNo} 
+              onChange={e => setFilters({...filters, refNo: e.target.value})} 
+              style={{ padding: 8, borderRadius: 6, border: '1px solid #475569', background: '#0f172a', color: '#fff' }} 
+            />
+            <input 
+              placeholder="Chasis / VIN" 
+              value={filters.chasis} 
+              onChange={e => setFilters({...filters, chasis: e.target.value})} 
+              style={{ padding: 8, borderRadius: 6, border: '1px solid #475569', background: '#0f172a', color: '#fff' }} 
+            />
+            <input 
+              placeholder="Marca" 
+              value={filters.marca} 
+              onChange={e => setFilters({...filters, marca: e.target.value})} 
+              style={{ padding: 8, borderRadius: 6, border: '1px solid #475569', background: '#0f172a', color: '#fff' }} 
+            />
+            <input 
+              placeholder="Modelo" 
+              value={filters.modelo} 
+              onChange={e => setFilters({...filters, modelo: e.target.value})} 
+              style={{ padding: 8, borderRadius: 6, border: '1px solid #475569', background: '#0f172a', color: '#fff' }} 
+            />
+            <input 
+              placeholder="Año" 
+              value={filters.anio} 
+              onChange={e => setFilters({...filters, anio: e.target.value})} 
+              style={{ padding: 8, borderRadius: 6, border: '1px solid #475569', background: '#0f172a', color: '#fff' }} 
+            />
+          </form>
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, borderTop: '1px solid #334155', paddingTop: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <button 
+                type="button" 
+                onClick={handleSelectAll} 
+                style={{ background: '#334155', color: '#fff', border: 'none', padding: '8px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600 }}
+              >
+                {selectedVehicleIds.length === filteredVehicles.length && filteredVehicles.length > 0 ? 'Deseleccionar Todos' : 'Seleccionar Todos'}
+              </button>
+              <span style={{ color: '#94a3b8', fontSize: 13 }}>
+                {selectedVehicleIds.length} seleccionados
+              </span>
+
+              <button 
+                type="button" 
+                onClick={exportarAExcel} 
+                style={{ background: '#16a34a', color: '#fff', border: 'none', padding: '8px 14px', borderRadius: 6, cursor: 'pointer', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}
+              >
+                📊 Descargar Excel ({selectedVehicleIds.length > 0 ? selectedVehicleIds.length : 'Todos'})
+              </button>
+            </div>
+
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button 
+                type="button" 
+                onClick={handleResetFilters} 
+                style={{ background: '#475569', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: 6, cursor: 'pointer', fontWeight: 600 }}
+              >
+                Reset
+              </button>
+              <button 
+                type="button" 
+                onClick={handleSearchFilters} 
+                style={{ background: '#2563eb', color: '#fff', border: 'none', padding: '8px 20px', borderRadius: 6, cursor: 'pointer', fontWeight: 600 }}
+              >
+                BUSCAR
+              </button>
+            </div>
+          </div>
+        </div>
+
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 16 }}>
-          {vehicles.map(car => {
+          {filteredVehicles.map(car => {
             const activeRes = reservations.find(r => r.vehicle_id === car.id && ['activa', 'revision_pago', 'extendida'].includes(r.estado));
+            const isSelected = selectedVehicleIds.includes(car.id);
+            const isExtending = extendingResId === (activeRes ? activeRes.id : null);
+            const estaReservado = car.estado === 'reservado' || car.estado === 'seña_en_revision' || activeRes;
+
+            const yaTuvoReservaCaidaEnEstaUnidad = reservations.some(
+              r => r.vehicle_id === car.id && 
+                   r.vendedor_id === profile.id && 
+                   ['vencida', 'cancelada_por_vendedor'].includes(r.estado)
+            );
 
             return (
-              <div key={car.id} style={{ background: '#fff', borderRadius: 10, overflow: 'hidden', border: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column' }}>
+              <div key={car.id} style={{ background: '#fff', borderRadius: 10, overflow: 'hidden', border: isSelected ? '2px solid #2563eb' : '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', position: 'relative' }}>
+                
+                <div style={{ position: 'absolute', top: 10, left: 10, zIndex: 10, background: 'rgba(0,0,0,0.6)', padding: '4px 8px', borderRadius: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <input 
+                    type="checkbox" 
+                    checked={isSelected} 
+                    onChange={() => toggleSelectVehicle(car.id)}
+                    style={{ width: 16, height: 16, cursor: 'pointer' }}
+                  />
+                  <span style={{ color: '#fff', fontSize: 11, fontWeight: 'bold' }}>Seleccionar</span>
+                </div>
+
                 {car.imagen_url ? (
                   <img src={car.imagen_url} alt={car.modelo} style={{ width: '100%', height: 160, objectFit: 'cover' }} />
                 ) : (
@@ -267,57 +593,147 @@ export default function App() {
                 
                 <div style={{ padding: 16, display: 'flex', flexDirection: 'column', flex: 1, justifyContent: 'space-between' }}>
                   <div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#64748b' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#64748b', marginBottom: 4 }}>
+                      <span>Ref: <strong>{car.ref_no || 'N/D'}</strong></span>
+                      <strong style={{ color: car.estado === 'vendido' ? '#16a34a' : (estaReservado ? '#d97706' : '#16a34a') }}>
+                        {estaReservado ? 'RESERVADA' : 'DISPONIBLE'}
+                      </strong>
+                    </div>
+                    <div style={{ fontSize: 12, color: '#64748b', marginBottom: 6 }}>
                       <span>VIN: {car.vin_chasis}</span>
-                      <strong style={{ color: car.estado === 'reservado' ? '#d97706' : '#16a34a' }}>{car.estado.toUpperCase().replaceAll('_', ' ')}</strong>
                     </div>
                     <h4 style={{ margin: '6px 0' }}>{car.marca} {car.modelo} ({car.anio})</h4>
                     <p style={{ margin: '0 0 12px', fontSize: 14 }}>Color: {car.color} — <strong>${car.precio.toLocaleString()}</strong></p>
                   </div>
 
-                  {/* Botón específico para ver historial y detalles */}
                   <button 
                     onClick={() => setSelectedCarDetail(car)} 
-                    style={{ width: '100%', padding: 8, marginBottom: 12, background: '#475569', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}
+                    style={{ width: '100%', padding: 8, marginBottom: 8, background: '#475569', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}
                   >
-                    🔍 Ver Historial y Detalles
+                    🔍 Ver Detalles
                   </button>
 
-                  {/* Cuadro amarillo visible solo para administradores si hay reserva vigente */}
+                  {esStockManagerOAdmin && (
+                    <button 
+                      onClick={() => setEditingCar(car)} 
+                      style={{ width: '100%', padding: 8, marginBottom: 12, background: '#d97706', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}
+                    >
+                      ✏️ Editar Unidad
+                    </button>
+                  )}
+
+                  {/* SOLO EL ADMIN VE QUIÉN RESERVÓ EN LA TARJETA SI ESTÁ RESERVADA */}
                   {!esVendedor && activeRes && (
                     <div style={{ background: '#fffbeb', border: '1px solid #fde68a', padding: 10, borderRadius: 8, fontSize: 13, marginBottom: 12 }}>
                       <div><strong>Vendedor/a:</strong> {activeRes.profiles?.nombre}</div>
                       <div><strong>Cliente:</strong> {activeRes.cliente_nombre}</div>
-                      <div style={{ color: '#dc2626', fontWeight: 700, marginTop: 4 }}>⏱ {formatTimeRemaining(activeRes.fecha_limite)}</div>
+                      <div style={{ color: '#dc2626', fontWeight: 700, marginTop: 4, marginBottom: 6 }}>⏱ {formatTimeRemaining(activeRes.fecha_limite)}</div>
+                      
+                      {profile.rol === 'admin' && (
+                        <div>
+                          {!isExtending ? (
+                            <button 
+                              onClick={() => {
+                                setExtendingResId(activeRes.id);
+                                const d = new Date(activeRes.fecha_limite);
+                                setNuevaFechaExt(d.toISOString().slice(0, 16));
+                              }} 
+                              style={{ width: '100%', padding: 6, background: '#d97706', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12, fontWeight: 'bold' }}
+                            >
+                              📅 Extender Reserva (Calendario)
+                            </button>
+                          ) : (
+                            <div style={{ background: '#fef3c7', padding: 8, borderRadius: 6, border: '1px solid #f59e0b' }}>
+                              <label style={{ fontSize: 11, fontWeight: 'bold', display: 'block', marginBottom: 4 }}>Nueva Fecha y Hora:</label>
+                              <input 
+                                type="datetime-local" 
+                                value={nuevaFechaExt} 
+                                onChange={e => setNuevaFechaExt(e.target.value)}
+                                style={{ width: '100%', padding: 6, fontSize: 12, marginBottom: 6, boxSizing: 'border-box' }}
+                              />
+                              <div style={{ display: 'flex', gap: 4 }}>
+                                <button 
+                                  onClick={() => setExtendingResId(null)} 
+                                  style={{ flex: 1, padding: 4, background: '#64748b', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 11 }}
+                                >
+                                  Cancelar
+                                </button>
+                                <button 
+                                  onClick={() => handleSaveExtendedDate(activeRes.id)} 
+                                  style={{ flex: 1, padding: 4, background: '#16a34a', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 11, fontWeight: 'bold' }}
+                                >
+                                  Guardar
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
 
                   <div>
-                    {profile.rol === 'admin' && !car.publicado_para_venta && (
-                      <button onClick={() => handlePublishVehicle(car.id)} style={{ width: '100%', padding: 10, background: '#2563eb', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', marginBottom: 8 }}>🚀 Habilitar Venta</button>
-                    )}
-                    {car.estado === 'disponible' && car.publicado_para_venta && profile.rol !== 'stock_manager' && (
-                      <button 
-                        onClick={() => setSelectedCar(car)} 
-                        disabled={estaCastigado}
-                        style={{ width: '100%', padding: 10, background: estaCastigado ? '#94a3b8' : '#0f172a', color: '#fff', border: 'none', borderRadius: 6, cursor: estaCastigado ? 'not-allowed' : 'pointer', marginBottom: 8 }}
-                      >
-                        {estaCastigado ? '🚫 Bloqueado por Castigo (24h)' : '📌 Reservar'}
-                      </button>
-                    )}
-                    
-                    {activeRes && (activeRes.vendedor_id === profile.id || profile.rol === 'admin') && (
-                      <button onClick={() => setSelectedReservation(activeRes)} style={{ width: '100%', padding: 10, background: '#d97706', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', marginBottom: 6 }}>📎 Subir Transferencia</button>
+                    {vistaActual === 'activos' && (
+                      <>
+                        {profile.rol === 'admin' && !car.publicado_para_venta && (
+                          <button onClick={() => handlePublishVehicle(car.id)} style={{ width: '100%', padding: 10, background: '#2563eb', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', marginBottom: 8 }}>🚀 Habilitar Venta</button>
+                        )}
+                        
+                        {estaReservado ? (
+                          <button 
+                            disabled 
+                            style={{ width: '100%', padding: 10, background: '#cbd5e1', color: '#475569', border: 'none', borderRadius: 6, cursor: 'not-allowed', marginBottom: 8, fontWeight: 'bold' }}
+                          >
+                            🔒 UNIDAD RESERVADA
+                          </button>
+                        ) : (
+                          car.estado === 'disponible' && car.publicado_para_venta && profile.rol !== 'stock_manager' && (
+                            <button 
+                              onClick={() => setSelectedCar(car)} 
+                              disabled={estaCastigado || yaTuvoReservaCaidaEnEstaUnidad}
+                              style={{ 
+                                width: '100%', 
+                                padding: 10, 
+                                background: (estaCastigado || yaTuvoReservaCaidaEnEstaUnidad) ? '#94a3b8' : '#0f172a', 
+                                color: '#fff', 
+                                border: 'none', 
+                                borderRadius: 6, 
+                                cursor: (estaCastigado || yaTuvoReservaCaidaEnEstaUnidad) ? 'not-allowed' : 'pointer', 
+                                marginBottom: 8 
+                              }}
+                            >
+                              {yaTuvoReservaCaidaEnEstaUnidad 
+                                ? '🚫 Penalizado (Reserva Caída Previa)' 
+                                : (estaCastigado ? '🚫 Bloqueado por Castigo (24h)' : '📌 Reservar')}
+                            </button>
+                          )
+                        )}
+                        
+                        {activeRes && (activeRes.vendedor_id === profile.id || profile.rol === 'admin') && (
+                          <button onClick={() => setSelectedReservation(activeRes)} style={{ width: '100%', padding: 10, background: '#d97706', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', marginBottom: 6 }}>📎 Subir Transferencia</button>
+                        )}
+
+                        {activeRes && activeRes.vendedor_id === profile.id && (
+                          <button onClick={() => handleCancelMyReservation(activeRes.id, car.id)} style={{ width: '100%', padding: 8, background: '#ef4444', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, marginBottom: 6 }}>❌ Anular Reserva</button>
+                        )}
+                      </>
                     )}
 
-                    {activeRes && activeRes.vendedor_id === profile.id && (
-                      <button onClick={() => handleCancelMyReservation(activeRes.id, car.id)} style={{ width: '100%', padding: 8, background: '#ef4444', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, marginBottom: 6 }}>❌ Anular Reserva (Cliente se arrepintió)</button>
-                    )}
-
-                    {profile.rol === 'admin' && car.estado !== 'disponible' && (
-                      <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-                        <button onClick={() => handleReleaseOrSell(car.id, 'disponible')} style={{ flex: 1, padding: 8, background: '#ef4444', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer' }}>Liberar</button>
-                        <button onClick={() => handleReleaseOrSell(car.id, 'vendido')} style={{ flex: 1, padding: 8, background: '#16a34a', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer' }}>Vendido</button>
+                    {profile.rol === 'admin' && (
+                      <div style={{ display: 'flex', gap: 8, marginTop: 4, flexDirection: 'column' }}>
+                        <div style={{ display: 'flex', gap: 8, flexDirection: 'column' }}>
+                          {car.estado === 'vendido' ? (
+                            <button onClick={() => handleReleaseOrSell(car.id, 'disponible')} style={{ width: '100%', padding: 8, background: '#2563eb', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer' }}>Volver a Stock</button>
+                          ) : (
+                            <>
+                              {car.estado !== 'disponible' && (
+                                <button onClick={() => handleReleaseOrSell(car.id, 'disponible')} style={{ width: '100%', padding: 8, background: '#ef4444', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontWeight: 'bold' }}>🔓 Liberar Unidad</button>
+                              )}
+                              <button onClick={() => handleReleaseOrSell(car.id, 'vendido')} style={{ width: '100%', padding: 8, background: '#16a34a', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer' }}>Vendido</button>
+                            </>
+                          )}
+                        </div>
+                        <button onClick={() => handleDeleteVehicle(car.id)} style={{ width: '100%', padding: 8, background: '#dc2626', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>🗑 Eliminar Unidad</button>
                       </div>
                     )}
                   </div>
@@ -327,7 +743,43 @@ export default function App() {
           })}
         </div>
 
-        {/* MODAL: DETALLES E HISTORIAL DE LA UNIDAD */}
+        {editingCar && (
+          <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}>
+            <form onSubmit={handleUpdateVehicle} style={{ background: '#fff', padding: 24, borderRadius: 12, width: '100%', maxWidth: 400 }}>
+              <h3 style={{ marginTop: 0, marginBottom: 16 }}>✏️ Editar Vehículo</h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <label style={{ fontSize: 12, fontWeight: 'bold' }}>Nro. Referencia:</label>
+                <input value={editingCar.ref_no || ''} onChange={e => setEditingCar({...editingCar, ref_no: e.target.value})} style={{ padding: 8 }} />
+                
+                <label style={{ fontSize: 12, fontWeight: 'bold' }}>Chasis / VIN:</label>
+                <input value={editingCar.vin_chasis || ''} onChange={e => setEditingCar({...editingCar, vin_chasis: e.target.value})} required style={{ padding: 8 }} />
+                
+                <label style={{ fontSize: 12, fontWeight: 'bold' }}>Marca:</label>
+                <input value={editingCar.marca || ''} onChange={e => setEditingCar({...editingCar, marca: e.target.value})} required style={{ padding: 8 }} />
+                
+                <label style={{ fontSize: 12, fontWeight: 'bold' }}>Modelo:</label>
+                <input value={editingCar.modelo || ''} onChange={e => setEditingCar({...editingCar, modelo: e.target.value})} required style={{ padding: 8 }} />
+                
+                <label style={{ fontSize: 12, fontWeight: 'bold' }}>Año:</label>
+                <input type="number" value={editingCar.anio || ''} onChange={e => setEditingCar({...editingCar, anio: e.target.value})} required style={{ padding: 8 }} />
+                
+                <label style={{ fontSize: 12, fontWeight: 'bold' }}>Color:</label>
+                <input value={editingCar.color || ''} onChange={e => setEditingCar({...editingCar, color: e.target.value})} required style={{ padding: 8 }} />
+                
+                <label style={{ fontSize: 12, fontWeight: 'bold' }}>Precio ($):</label>
+                <input type="number" value={editingCar.precio || ''} onChange={e => setEditingCar({...editingCar, precio: e.target.value})} required style={{ padding: 8 }} />
+                
+                <label style={{ fontSize: 12, fontWeight: 'bold' }}>URL de la Foto (Link):</label>
+                <input value={editingCar.imagen_url || ''} onChange={e => setEditingCar({...editingCar, imagen_url: e.target.value})} style={{ padding: 8 }} />
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+                <button type="button" onClick={() => setEditingCar(null)} style={{ flex: 1, padding: 10, cursor: 'pointer' }}>Cancelar</button>
+                <button type="submit" style={{ flex: 1, padding: 10, background: '#2563eb', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontWeight: 600 }}>Guardar Cambios</button>
+              </div>
+            </form>
+          </div>
+        )}
+
         {selectedCarDetail && (
           <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}>
             <div style={{ background: '#fff', padding: 24, borderRadius: 12, width: '100%', maxWidth: 500, maxHeight: '90vh', overflowY: 'auto' }}>
@@ -343,16 +795,17 @@ export default function App() {
               )}
 
               <div style={{ background: '#f8fafc', padding: 12, borderRadius: 8, marginBottom: 16, fontSize: 14, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                <div><strong>Nro. Referencia:</strong> {selectedCarDetail.ref_no || 'N/D'}</div>
                 <div><strong>VIN / Chasis:</strong> {selectedCarDetail.vin_chasis}</div>
                 <div><strong>Color:</strong> {selectedCarDetail.color}</div>
                 <div><strong>Precio:</strong> ${selectedCarDetail.precio.toLocaleString()}</div>
-                <div><strong>Estado Actual:</strong> {selectedCarDetail.estado.toUpperCase().replaceAll('_', ' ')}</div>
+                <div style={{ gridColumn: '1 / -1' }}><strong>Estado Actual:</strong> {selectedCarDetail.estado.toUpperCase().replaceAll('_', ' ')}</div>
               </div>
 
-              {/* Historial detallado de reservas (Exclusivo para admin) */}
+              {/* HISTORIAL RESTRINGIDO EXCLUSIVAMENTE PARA ADMINS */}
               {profile.rol === 'admin' && (
                 <div>
-                  <h4 style={{ margin: '0 0 8px', borderBottom: '2px solid #e2e8f0', paddingBottom: 4 }}>📋 Historial de Reservas</h4>
+                  <h4 style={{ margin: '0 0 8px', borderBottom: '2px solid #e2e8f0', paddingBottom: 4 }}>📋 Historial de Reservas (Solo Admins)</h4>
                   {reservations.filter(r => r.vehicle_id === selectedCarDetail.id).length === 0 ? (
                     <p style={{ fontSize: 13, color: '#64748b' }}>Este vehículo no registra reservas anteriores.</p>
                   ) : (
