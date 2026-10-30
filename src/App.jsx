@@ -18,8 +18,9 @@ export default function App() {
   const [filteredVehicles, setFilteredVehicles] = useState([]);
   const [reservations, setReservations] = useState([]);
   const [receipts, setReceipts] = useState([]);
+  const [allProfiles, setAllProfiles] = useState([]);
 
-  const [vistaActual, setVistaActual] = useState('activos');
+  const [vistaActual, setVistaActual] = useState('activos'); // 'activos', 'reservados', o 'vendidos'
   const [orden, setOrden] = useState('recientes');
   const [selectedVehicleIds, setSelectedVehicleIds] = useState([]);
 
@@ -28,12 +29,17 @@ export default function App() {
   const [extendingResId, setExtendingResId] = useState(null);
   const [nuevaFechaExt, setNuevaFechaExt] = useState('');
 
+  // 💡 Estado para el modal de extensión masiva (Admin)
+  const [showMasiveExtendModal, setShowMasiveExtendModal] = useState(false);
+  const [masiveFechaExt, setMasiveFechaExt] = useState('');
+
   const [filters, setFilters] = useState({
     marca: '',
     modelo: '',
     anio: '',
     chasis: '',
-    refNo: ''
+    refNo: '',
+    vendedorId: ''
   });
 
   const [selectedCar, setSelectedCar] = useState(null);
@@ -50,6 +56,28 @@ export default function App() {
   const [uploading, setUploading] = useState(false);
 
   const [currentTime, setCurrentTime] = useState(new Date());
+
+  async function sincronizarConGoogleSheets(refNo, estado, clienteNombre, vendedorNombre) {
+    if (!refNo) return;
+    const URL_GOOGLE_SHEETS = "PEGÁ_AQUÍ_LA_URL_DE_TU_APLICACION_WEB_DE_APPS_SCRIPT";
+    if (URL_GOOGLE_SHEETS.includes("PEGÁ_AQUÍ")) return;
+    
+    try {
+      await fetch(URL_GOOGLE_SHEETS, {
+        method: "POST",
+        mode: "no-cors",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ref_no: refNo,
+          estado: estado,
+          cliente_nombre: clienteNombre,
+          vendedor_nombre: vendedorNombre
+        })
+      });
+    } catch (error) {
+      console.error("Error al sincronizar con Sheets:", error);
+    }
+  }
 
   const getDisplayRole = (rol, userEmail) => {
     if (rol === 'admin') return 'Administrador/a';
@@ -99,25 +127,29 @@ export default function App() {
       prof.email = userEmail;
     }
     setProfile(prof);
+
+    const { data: profilesData } = await supabase.from('profiles').select('*');
+    if (profilesData) setAllProfiles(profilesData);
+
     await loadAllData();
     setLoading(false);
   }
 
   async function loadAllData() {
-    await loadVehiclesByView(vistaActual);
     const { data: rData } = await supabase.from('reservations').select('*, profiles(nombre, email)').order('fecha_inicio', { ascending: false });
-    if (rData) setReservations(rData);
+    if (rData) setReservations(rData || []);
     const { data: pData } = await supabase.from('payment_receipts').select('*, profiles!payment_receipts_vendedor_id_fkey(nombre, email)').order('subido_el', { ascending: false });
-    if (pData) setReceipts(pData);
+    if (pData) setReceipts(pData || []);
+    await loadVehiclesByView(vistaActual);
   }
 
   async function loadVehiclesByView(vista) {
     let query = supabase.from('vehicles').select('*');
     
-    if (vista === 'activos') {
-      query = query.neq('estado', 'vendido');
-    } else if (vista === 'vendidos') {
+    if (vista === 'vendidos') {
       query = query.eq('estado', 'vendido');
+    } else {
+      query = query.neq('estado', 'vendido');
     }
 
     if (orden === 'recientes') {
@@ -134,10 +166,46 @@ export default function App() {
 
     const { data: vData } = await query;
     if (vData) {
-      setVehicles(vData);
-      setFilteredVehicles(vData);
-      setSelectedVehicleIds([]);
+      setVehicles(vData || []);
+      aplicarFiltrosLocales(vData || [], reservations, vistaActual, filters, orden);
     }
+  }
+
+  function aplicarFiltrosLocales(listaVehiculos, listaReservas, vista, currentFilters, currentOrden) {
+    let resultado = listaVehiculos.filter(car => {
+      const activeRes = listaReservas.find(r => r.vehicle_id === car.id && ['activa', 'revision_pago', 'extendida'].includes(r.estado));
+      const estaReservado = car.estado === 'reservado' || car.estado === 'seña_en_revision' || Boolean(activeRes);
+
+      if (vista === 'activos' && estaReservado) return false;
+      if (vista === 'reservados' && !estaReservado) return false;
+
+      const matchMarca = currentFilters.marca === '' || (car.marca && car.marca.toLowerCase().includes(currentFilters.marca.toLowerCase()));
+      const matchModelo = currentFilters.modelo === '' || (car.modelo && car.modelo.toLowerCase().includes(currentFilters.modelo.toLowerCase()));
+      const matchAnio = currentFilters.anio === '' || String(car.anio).includes(currentFilters.anio);
+      const matchChasis = currentFilters.chasis === '' || (car.vin_chasis && car.vin_chasis.toLowerCase().includes(currentFilters.chasis.toLowerCase()));
+      
+      // 💡 Búsqueda mejorada para múltiples referencias (separadas por espacios, comas o saltos de línea)
+      let matchRef = true;
+      if (currentFilters.refNo && currentFilters.refNo.trim() !== '') {
+        const refsBuscadas = currentFilters.refNo
+          .split(/[\s,]+/) // Divide por espacios o comas
+          .map(r => r.trim().toLowerCase())
+          .filter(Boolean);
+
+        const refVehiculo = car.ref_no ? String(car.ref_no).trim().toLowerCase() : '';
+        matchRef = refsBuscadas.some(ref => refVehiculo.includes(ref));
+      }
+
+      let matchVendedor = true;
+      if (currentFilters.vendedorId !== '') {
+        matchVendedor = activeRes && activeRes.vendedor_id === currentFilters.vendedorId;
+      }
+
+      return matchMarca && matchModelo && matchAnio && matchChasis && matchRef && matchVendedor;
+    });
+
+    setFilteredVehicles(resultado);
+    setSelectedVehicleIds([]);
   }
 
   async function checkExpiredReservations(now) {
@@ -146,8 +214,12 @@ export default function App() {
       if (['activa', 'extendida'].includes(res.estado) && new Date(res.fecha_limite) <= now) {
         await supabase.from('reservations').update({ estado: 'vencida' }).eq('id', res.id);
         await supabase.from('vehicles').update({ estado: 'disponible' }).eq('id', res.vehicle_id);
-        const penalizacionHasta = new Date(now.getTime() + 24 * 3600000).toISOString();
-        await supabase.from('profiles').update({ penalizado_hasta: penalizacionHasta }).eq('id', res.vendedor_id);
+        
+        const vehiculoAfectado = vehicles.find(v => v.id === res.vehicle_id);
+        if (vehiculoAfectado) {
+          sincronizarConGoogleSheets(vehiculoAfectado.ref_no, 'disponible', '', '');
+        }
+
         loadAllData();
       }
     }
@@ -236,6 +308,32 @@ export default function App() {
     }
   }
 
+  // 💡 Función para extender de forma masiva las reservas de las unidades seleccionadas
+  async function handleMasiveExtend() {
+    if (!masiveFechaExt) return alert('Selecciona una fecha y hora válidas.');
+    if (selectedVehicleIds.length === 0) return alert('No hay unidades seleccionadas.');
+
+    if (!confirm(`¿Estás seguro de extender la reserva para las ${selectedVehicleIds.length} unidades seleccionadas?`)) return;
+
+    const nuevaFechaISO = new Date(masiveFechaExt).toISOString();
+
+    for (const carId of selectedVehicleIds) {
+      const activeRes = reservations.find(r => r.vehicle_id === carId && ['activa', 'revision_pago', 'extendida'].includes(r.estado));
+      if (activeRes) {
+        await supabase.from('reservations').update({ 
+          fecha_limite: nuevaFechaISO, 
+          estado: 'extendida' 
+        }).eq('id', activeRes.id);
+      }
+    }
+
+    setShowMasiveExtendModal(false);
+    setMasiveFechaExt('');
+    setSelectedVehicleIds([]);
+    loadAllData();
+    alert('¡Reservas extendidas exitosamente de forma masiva!');
+  }
+
   function toggleSelectVehicle(carId) {
     if (selectedVehicleIds.includes(carId)) {
       setSelectedVehicleIds(selectedVehicleIds.filter(id => id !== carId));
@@ -254,23 +352,13 @@ export default function App() {
 
   function handleSearchFilters(e) {
     if (e) e.preventDefault();
-    const result = vehicles.filter(car => {
-      const matchMarca = filters.marca === '' || (car.marca && car.marca.toLowerCase().includes(filters.marca.toLowerCase()));
-      const matchModelo = filters.modelo === '' || (car.modelo && car.modelo.toLowerCase().includes(filters.modelo.toLowerCase()));
-      const matchAnio = filters.anio === '' || String(car.anio).includes(filters.anio);
-      const matchChasis = filters.chasis === '' || (car.vin_chasis && car.vin_chasis.toLowerCase().includes(filters.chasis.toLowerCase()));
-      const matchRef = filters.refNo === '' || (car.ref_no && String(car.ref_no).toLowerCase().includes(filters.refNo.toLowerCase()));
-
-      return matchMarca && matchModelo && matchAnio && matchChasis && matchRef;
-    });
-    setFilteredVehicles(result);
-    setSelectedVehicleIds([]);
+    aplicarFiltrosLocales(vehicles, reservations, vistaActual, filters, orden);
   }
 
   function handleResetFilters() {
-    setFilters({ marca: '', modelo: '', anio: '', chasis: '', refNo: '' });
-    setFilteredVehicles(vehicles);
-    setSelectedVehicleIds([]);
+    const emptyFilters = { marca: '', modelo: '', anio: '', chasis: '', refNo: '', vendedorId: '' };
+    setFilters(emptyFilters);
+    aplicarFiltrosLocales(vehicles, reservations, vistaActual, emptyFilters, orden);
   }
 
   function exportarAExcel() {
@@ -282,18 +370,33 @@ export default function App() {
       return alert('No hay unidades seleccionadas para exportar.');
     }
 
-    const headers = ['Nro Referencia', 'Chasis / VIN', 'Marca', 'Modelo', 'Anio', 'Color', 'Precio ($)', 'Estado'];
+    const headers = ['Nro Referencia', 'Chasis / VIN', 'Marca', 'Modelo', 'Anio', 'Color', 'Precio ($)', 'Estado', 'Vendedor'];
     
-    const rows = autosAExportar.map(car => [
-      car.ref_no || 'N/D',
-      car.vin_chasis || '',
-      car.marca || '',
-      car.modelo || '',
-      car.anio || '',
-      car.color || '',
-      car.precio || 0,
-      car.estado ? car.estado.toUpperCase() : ''
-    ]);
+    const rows = autosAExportar.map(car => {
+      const activeRes = reservations.find(r => r.vehicle_id === car.id && ['activa', 'revision_pago', 'extendida'].includes(r.estado));
+      const estaReservado = car.estado === 'reservado' || car.estado === 'seña_en_revision' || Boolean(activeRes);
+      
+      let estadoTexto = 'DISPONIBLE';
+      if (car.estado === 'vendido') {
+        estadoTexto = 'VENDIDO';
+      } else if (estaReservado) {
+        estadoTexto = 'RESERVADO';
+      }
+
+      const vendedorNombre = (estaReservado && activeRes && activeRes.profiles?.nombre) ? activeRes.profiles.nombre : '';
+
+      return [
+        car.ref_no || 'N/D',
+        car.vin_chasis || '',
+        car.marca || '',
+        car.modelo || '',
+        car.anio || '',
+        car.color || '',
+        car.precio || 0,
+        estadoTexto,
+        vendedorNombre
+      ];
+    });
 
     let csvContent = '\uFEFF' + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
 
@@ -301,7 +404,7 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', url);
-    link.setAttribute('download', `GS_Import_Seleccion_${vistaActual}_${new Date().toISOString().slice(0,10)}.csv`);
+    link.setAttribute('download', `GS_Import_Stock_${vistaActual}_${new Date().toISOString().slice(0,10)}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -311,21 +414,22 @@ export default function App() {
     e.preventDefault();
     if (!selectedCar) return;
 
-    const yaTuvoReservaCaidaEnEstaUnidad = reservations.some(
+    const ultimaReservaCaida = reservations.find(
       r => r.vehicle_id === selectedCar.id && 
            r.vendedor_id === profile.id && 
-           ['vencida', 'cancelada_por_vendedor'].includes(r.estado)
+           ['vencida', 'cancelada_por_vendedor', 'cancelada_por_admin'].includes(r.estado)
     );
 
-    if (yaTuvoReservaCaidaEnEstaUnidad) {
-      setSelectedCar(null);
-      return alert('🚫 No puedes volver a reservar esta unidad específica porque ya se te cayó una reserva anterior en la misma.');
-    }
+    if (ultimaReservaCaida) {
+      const fechaCaida = new Date(ultimaReservaCaida.fecha_limite || ultimaReservaCaida.fecha_inicio);
+      const msTranscurridos = currentTime - fechaCaida;
+      const ms24Horas = 24 * 3600 * 1000;
 
-    if (profile.penalizado_hasta && new Date(profile.penalizado_hasta) > currentTime) {
-      const diffMs = new Date(profile.penalizado_hasta) - currentTime;
-      const horasRestantes = Math.ceil(diffMs / 3600000);
-      return alert(`🚫 Estás penalizado por dejar caer una reserva anterior. No puedes reservar por ${horasRestantes} hora(s) más.`);
+      if (msTranscurridos < ms24Horas) {
+        const horasRestantes = Math.ceil((ms24Horas - msTranscurridos) / 3600000);
+        setSelectedCar(null);
+        return alert(`🚫 Estás penalizado en esta unidad específica por 24 horas debido a una reserva caída. Podés reservar cualquier otro vehículo, pero este unitario estará disponible para vos en ${horasRestantes} hora(s).`);
+      }
     }
 
     const limite = new Date(Date.now() + horasReserva * 3600000).toISOString();
@@ -337,6 +441,8 @@ export default function App() {
     if (error) return alert('Error al reservar: ' + error.message);
     await supabase.from('vehicles').update({ estado: 'reservado' }).eq('id', selectedCar.id);
     
+    await sincronizarConGoogleSheets(selectedCar.ref_no, 'reservado', clienteNombre, profile.nombre);
+
     setSelectedCar(null); setClienteNombre(''); setClienteDoc('');
     loadAllData();
     alert('¡Vehículo reservado con éxito!');
@@ -363,11 +469,32 @@ export default function App() {
   }
 
   async function handleCancelMyReservation(reservationId, carId) {
-    if (!confirm('¿Estás seguro de anular esta reserva? El vehículo volverá a estar disponible.')) return;
+    if (!confirm('¿Estás seguro de anular esta reserva? El vehículo volverá a estar disponible para los demás vendedores.')) return;
     await supabase.from('reservations').update({ estado: 'cancelada_por_vendedor' }).eq('id', reservationId);
     await supabase.from('vehicles').update({ estado: 'disponible' }).eq('id', carId);
+
+    const vehiculoAfectado = vehicles.find(v => v.id === carId);
+    if (vehiculoAfectado) {
+      await sincronizarConGoogleSheets(vehiculoAfectado.ref_no, 'disponible', '', '');
+    }
+
     loadAllData();
-    alert('Reserva anulada correctamente. El vehículo ya está disponible.');
+    alert('Reserva anulada correctamente. El vehículo ya está disponible en el stock.');
+  }
+
+  async function handleAdminCancelReservation(reservationId, carId) {
+    if (!confirm('⚠️ [ADMIN] ¿Estás seguro de dar de baja la reserva activa de este vendedor? El vehículo volverá a estar disponible inmediatamente.')) return;
+    
+    await supabase.from('reservations').update({ estado: 'cancelada_por_admin' }).eq('id', reservationId);
+    await supabase.from('vehicles').update({ estado: 'disponible' }).eq('id', carId);
+
+    const vehiculoAfectado = vehicles.find(v => v.id === carId);
+    if (vehiculoAfectado) {
+      await sincronizarConGoogleSheets(vehiculoAfectado.ref_no, 'disponible', '', '');
+    }
+
+    loadAllData();
+    alert('Reserva dada de baja por el administrador con éxito.');
   }
 
   async function handleReleaseOrSell(carId, nuevoEstado) {
@@ -375,6 +502,12 @@ export default function App() {
     if (nuevoEstado === 'disponible') {
       await supabase.from('reservations').update({ estado: 'cancelada' }).eq('vehicle_id', carId).in('estado', ['activa', 'revision_pago', 'extendida']);
     }
+
+    const vehiculoAfectado = vehicles.find(v => v.id === carId);
+    if (vehiculoAfectado) {
+      await sincronizarConGoogleSheets(vehiculoAfectado.ref_no, nuevoEstado, '', '');
+    }
+
     loadAllData();
   }
 
@@ -386,6 +519,14 @@ export default function App() {
     const m = Math.floor((diff / 60000) % 60);
     const s = Math.floor((diff / 1000) % 60);
     return d > 0 ? `${d}d ${h}h ${m}m ${s}s restantes` : `${h}h ${m}m ${s}s restantes`;
+  }
+
+  function calcularDiasEnStock(fechaCreacion) {
+    if (!fechaCreacion) return 'Recién cargado';
+    const diffTime = Math.abs(currentTime - new Date(fechaCreacion));
+    const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+    if (diffDays === 0) return '⏱ Cargado hoy (0 días)';
+    return `⏱ ${diffDays} día(s) en stock`;
   }
 
   if (loading) return <div style={{ padding: 40, textAlign: 'center', fontFamily: 'sans-serif' }}>Cargando sistema...</div>;
@@ -405,10 +546,10 @@ export default function App() {
     );
   }
 
-  const estaCastigado = profile.penalizado_hasta && new Date(profile.penalizado_hasta) > currentTime;
   const userRoleText = getDisplayRole(profile.rol, profile.email);
   const esVendedor = profile.rol === 'vendedor';
   const esStockManagerOAdmin = profile.rol === 'stock_manager' || profile.rol === 'admin';
+  const esAdmin = profile.rol === 'admin';
 
   return (
     <div style={{ minHeight: '100vh', background: '#f8fafc', fontFamily: 'sans-serif', color: '#0f172a' }}>
@@ -421,15 +562,9 @@ export default function App() {
       </header>
 
       <div style={{ maxWidth: 1100, margin: '24px auto', padding: '0 16px' }}>
-        {estaCastigado && (
-          <div style={{ background: '#fee2e2', border: '1px solid #fca5a5', color: '#b91c1c', padding: 14, borderRadius: 8, marginBottom: 20, fontWeight: 600 }}>
-            🚫 Tienes una penalización activa por dejar vencer una reserva anterior. No podrás realizar nuevas reservas hasta que transcurran las 24 horas de castigo.
-          </div>
-        )}
-
         {esStockManagerOAdmin && (
           <div style={{ background: '#fff', padding: 18, borderRadius: 10, marginBottom: 24, border: '1px solid #e2e8f0' }}>
-            <h3 style={{ marginTop: 0 }}>📦 Cargar Vehículo a Stock Interno.</h3>
+            <h3 style={{ marginTop: 0 }}>📦 Cargar Vehículo a Stock Interno</h3>
             <form onSubmit={handleCreateVehicle} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10 }}>
               <input placeholder="Nro. Referencia" value={newCar.ref_no} onChange={e => setNewCar({...newCar, ref_no: e.target.value})} style={{ padding: 8 }} />
               <input placeholder="Chasis / VIN" value={newCar.vin_chasis} onChange={e => setNewCar({...newCar, vin_chasis: e.target.value})} required style={{ padding: 8 }} />
@@ -446,7 +581,7 @@ export default function App() {
 
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
           <h3 style={{ margin: 0 }}>
-            {vistaActual === 'activos' ? `🚗 UNIDADES ACTIVAS Y DISPONIBLES (${filteredVehicles.length})` : `📁 HISTORIAL DE UNIDADES VENDIDAS (${filteredVehicles.length})`}
+            {vistaActual === 'activos' ? `🚗 UNIDADES DISPONIBLES (${filteredVehicles.length})` : vistaActual === 'reservados' ? `🔒 UNIDADES RESERVADAS (${filteredVehicles.length})` : `📁 HISTORIAL DE UNIDADES VENDIDAS (${filteredVehicles.length})`}
           </h3>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
@@ -470,7 +605,13 @@ export default function App() {
                 onClick={() => setVistaActual('activos')}
                 style={{ padding: '6px 14px', borderRadius: 6, border: 'none', background: vistaActual === 'activos' ? '#0f172a' : 'transparent', color: vistaActual === 'activos' ? '#fff' : '#475569', fontWeight: 600, cursor: 'pointer', fontSize: 13 }}
               >
-                Disponibles / Stock
+                🟢 Disponibles / Stock
+              </button>
+              <button 
+                onClick={() => setVistaActual('reservados')}
+                style={{ padding: '6px 14px', borderRadius: 6, border: 'none', background: vistaActual === 'reservados' ? '#d97706' : 'transparent', color: vistaActual === 'reservados' ? '#fff' : '#475569', fontWeight: 600, cursor: 'pointer', fontSize: 13 }}
+              >
+                🔒 Reservados
               </button>
               {profile.rol === 'admin' && (
                 <button 
@@ -487,7 +628,7 @@ export default function App() {
         <div style={{ background: '#1e293b', padding: 16, borderRadius: 10, marginBottom: 20, border: '1px solid #334155' }}>
           <form onSubmit={handleSearchFilters} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10, marginBottom: 12 }}>
             <input 
-              placeholder="Nro. Referencia" 
+              placeholder="Ref (Ej: CF325349, CF325353)" 
               value={filters.refNo} 
               onChange={e => setFilters({...filters, refNo: e.target.value})} 
               style={{ padding: 8, borderRadius: 6, border: '1px solid #475569', background: '#0f172a', color: '#fff' }} 
@@ -516,10 +657,20 @@ export default function App() {
               onChange={e => setFilters({...filters, anio: e.target.value})} 
               style={{ padding: 8, borderRadius: 6, border: '1px solid #475569', background: '#0f172a', color: '#fff' }} 
             />
+            <select
+              value={filters.vendedorId}
+              onChange={e => setFilters({...filters, vendedorId: e.target.value})}
+              style={{ padding: 8, borderRadius: 6, border: '1px solid #475569', background: '#0f172a', color: '#fff', cursor: 'pointer' }}
+            >
+              <option value="">👤 Todos los Vendedores</option>
+              {allProfiles.map(p => (
+                <option key={p.id} value={p.id}>{p.nombre || p.email}</option>
+              ))}
+            </select>
           </form>
 
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, borderTop: '1px solid #334155', paddingTop: 12 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
               <button 
                 type="button" 
                 onClick={handleSelectAll} 
@@ -530,6 +681,17 @@ export default function App() {
               <span style={{ color: '#94a3b8', fontSize: 13 }}>
                 {selectedVehicleIds.length} seleccionados
               </span>
+
+              {/* 💡 Botón exclusivo de Admin para Extender Masivamente las reservas seleccionadas */}
+              {esAdmin && selectedVehicleIds.length > 0 && (
+                <button 
+                  type="button"
+                  onClick={() => setShowMasiveExtendModal(true)}
+                  style={{ background: '#d97706', color: '#fff', border: 'none', padding: '8px 12px', borderRadius: 6, cursor: 'pointer', fontWeight: 600, fontSize: 12 }}
+                >
+                  📅 Extender Seleccionadas ({selectedVehicleIds.length})
+                </button>
+              )}
 
               <button 
                 type="button" 
@@ -564,13 +726,23 @@ export default function App() {
             const activeRes = reservations.find(r => r.vehicle_id === car.id && ['activa', 'revision_pago', 'extendida'].includes(r.estado));
             const isSelected = selectedVehicleIds.includes(car.id);
             const isExtending = extendingResId === (activeRes ? activeRes.id : null);
-            const estaReservado = car.estado === 'reservado' || car.estado === 'seña_en_revision' || activeRes;
+            const estaReservado = car.estado === 'reservado' || car.estado === 'seña_en_revision' || Boolean(activeRes);
 
-            const yaTuvoReservaCaidaEnEstaUnidad = reservations.some(
+            const ultimaReservaCaida = reservations.find(
               r => r.vehicle_id === car.id && 
                    r.vendedor_id === profile.id && 
-                   ['vencida', 'cancelada_por_vendedor'].includes(r.estado)
+                   ['vencida', 'cancelada_por_vendedor', 'cancelada_por_admin'].includes(r.estado)
             );
+
+            let estaPenalizadoEnUnidad = false;
+            if (ultimaReservaCaida) {
+              const fechaCaida = new Date(ultimaReservaCaida.fecha_limite || ultimaReservaCaida.fecha_inicio);
+              const msTranscurridos = currentTime - fechaCaida;
+              const ms24Horas = 24 * 3600 * 1000;
+              if (msTranscurridos < ms24Horas) {
+                estaPenalizadoEnUnidad = true;
+              }
+            }
 
             return (
               <div key={car.id} style={{ background: '#fff', borderRadius: 10, overflow: 'hidden', border: isSelected ? '2px solid #2563eb' : '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', position: 'relative' }}>
@@ -603,7 +775,13 @@ export default function App() {
                       <span>VIN: {car.vin_chasis}</span>
                     </div>
                     <h4 style={{ margin: '6px 0' }}>{car.marca} {car.modelo} ({car.anio})</h4>
-                    <p style={{ margin: '0 0 12px', fontSize: 14 }}>Color: {car.color} — <strong>${car.precio.toLocaleString()}</strong></p>
+                    <p style={{ margin: '0 0 6px', fontSize: 14 }}>Color: {car.color} — <strong>${car.precio.toLocaleString()}</strong></p>
+                    
+                    {esAdmin && (
+                      <div style={{ fontSize: 12, color: '#2563eb', fontWeight: 'bold', marginBottom: 10, background: '#eff6ff', padding: '4px 8px', borderRadius: 4, display: 'inline-block' }}>
+                        {calcularDiasEnStock(car.creado_el)}
+                      </div>
+                    )}
                   </div>
 
                   <button 
@@ -622,7 +800,6 @@ export default function App() {
                     </button>
                   )}
 
-                  {/* SOLO EL ADMIN VE QUIÉN RESERVÓ EN LA TARJETA SI ESTÁ RESERVADA */}
                   {!esVendedor && activeRes && (
                     <div style={{ background: '#fffbeb', border: '1px solid #fde68a', padding: 10, borderRadius: 8, fontSize: 13, marginBottom: 12 }}>
                       <div><strong>Vendedor/a:</strong> {activeRes.profiles?.nombre}</div>
@@ -638,12 +815,12 @@ export default function App() {
                                 const d = new Date(activeRes.fecha_limite);
                                 setNuevaFechaExt(d.toISOString().slice(0, 16));
                               }} 
-                              style={{ width: '100%', padding: 6, background: '#d97706', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12, fontWeight: 'bold' }}
+                              style={{ width: '100%', padding: 6, background: '#d97706', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12, fontWeight: 'bold', marginBottom: 6 }}
                             >
                               📅 Extender Reserva (Calendario)
                             </button>
                           ) : (
-                            <div style={{ background: '#fef3c7', padding: 8, borderRadius: 6, border: '1px solid #f59e0b' }}>
+                            <div style={{ background: '#fef3c7', padding: 8, borderRadius: 6, border: '1px solid #f59e0b', marginBottom: 6 }}>
                               <label style={{ fontSize: 11, fontWeight: 'bold', display: 'block', marginBottom: 4 }}>Nueva Fecha y Hora:</label>
                               <input 
                                 type="datetime-local" 
@@ -667,13 +844,20 @@ export default function App() {
                               </div>
                             </div>
                           )}
+
+                          <button 
+                            onClick={() => handleAdminCancelReservation(activeRes.id, car.id)}
+                            style={{ width: '100%', padding: 6, background: '#dc2626', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12, fontWeight: 'bold' }}
+                          >
+                            ❌ Dar de Baja Reserva (Admin)
+                          </button>
                         </div>
                       )}
                     </div>
                   )}
 
                   <div>
-                    {vistaActual === 'activos' && (
+                    {vistaActual !== 'vendidos' && (
                       <>
                         {profile.rol === 'admin' && !car.publicado_para_venta && (
                           <button onClick={() => handlePublishVehicle(car.id)} style={{ width: '100%', padding: 10, background: '#2563eb', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', marginBottom: 8 }}>🚀 Habilitar Venta</button>
@@ -690,21 +874,21 @@ export default function App() {
                           car.estado === 'disponible' && car.publicado_para_venta && profile.rol !== 'stock_manager' && (
                             <button 
                               onClick={() => setSelectedCar(car)} 
-                              disabled={estaCastigado || yaTuvoReservaCaidaEnEstaUnidad}
+                              disabled={estaPenalizadoEnUnidad}
                               style={{ 
                                 width: '100%', 
                                 padding: 10, 
-                                background: (estaCastigado || yaTuvoReservaCaidaEnEstaUnidad) ? '#94a3b8' : '#0f172a', 
+                                background: estaPenalizadoEnUnidad ? '#94a3b8' : '#0f172a', 
                                 color: '#fff', 
                                 border: 'none', 
                                 borderRadius: 6, 
-                                cursor: (estaCastigado || yaTuvoReservaCaidaEnEstaUnidad) ? 'not-allowed' : 'pointer', 
+                                cursor: estaPenalizadoEnUnidad ? 'not-allowed' : 'pointer', 
                                 marginBottom: 8 
                               }}
                             >
-                              {yaTuvoReservaCaidaEnEstaUnidad 
-                                ? '🚫 Penalizado (Reserva Caída Previa)' 
-                                : (estaCastigado ? '🚫 Bloqueado por Castigo (24h)' : '📌 Reservar')}
+                              {estaPenalizadoEnUnidad 
+                                ? '🚫 Penalizado (24h en esta unidad)' 
+                                : '📌 Reservar'}
                             </button>
                           )
                         )}
@@ -742,6 +926,29 @@ export default function App() {
             );
           })}
         </div>
+
+        {/* 💡 Modal para la extensión masiva de reservas (Admin) */}
+        {showMasiveExtendModal && (
+          <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}>
+            <div style={{ background: '#fff', padding: 24, borderRadius: 12, width: '100%', maxWidth: 400 }}>
+              <h3 style={{ marginTop: 0, marginBottom: 12 }}>📅 Extensión Masiva de Reservas</h3>
+              <p style={{ fontSize: 13, color: '#64748b', marginBottom: 16 }}>
+                Se aplicará la nueva fecha y hora límite a las <strong>{selectedVehicleIds.length}</strong> unidades seleccionadas.
+              </p>
+              <label style={{ fontSize: 12, fontWeight: 'bold', display: 'block', marginBottom: 6 }}>Nueva Fecha y Hora Límite:</label>
+              <input 
+                type="datetime-local" 
+                value={masiveFechaExt} 
+                onChange={e => setMasiveFechaExt(e.target.value)}
+                style={{ width: '100%', padding: 8, fontSize: 13, marginBottom: 16, boxSizing: 'border-box' }}
+              />
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button type="button" onClick={() => setShowMasiveExtendModal(false)} style={{ flex: 1, padding: 10, cursor: 'pointer', background: '#64748b', color: '#fff', border: 'none', borderRadius: 6 }}>Cancelar</button>
+                <button type="button" onClick={handleMasiveExtend} style={{ flex: 1, padding: 10, background: '#16a34a', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontWeight: 600 }}>Aplicar a Todas</button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {editingCar && (
           <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}>
@@ -800,9 +1007,11 @@ export default function App() {
                 <div><strong>Color:</strong> {selectedCarDetail.color}</div>
                 <div><strong>Precio:</strong> ${selectedCarDetail.precio.toLocaleString()}</div>
                 <div style={{ gridColumn: '1 / -1' }}><strong>Estado Actual:</strong> {selectedCarDetail.estado.toUpperCase().replaceAll('_', ' ')}</div>
+                {esAdmin && (
+                  <div style={{ gridColumn: '1 / -1' }}><strong>Tiempo en Stock:</strong> {calcularDiasEnStock(selectedCarDetail.creado_el)}</div>
+                )}
               </div>
 
-              {/* HISTORIAL RESTRINGIDO EXCLUSIVAMENTE PARA ADMINS */}
               {profile.rol === 'admin' && (
                 <div>
                   <h4 style={{ margin: '0 0 8px', borderBottom: '2px solid #e2e8f0', paddingBottom: 4 }}>📋 Historial de Reservas (Solo Admins)</h4>
