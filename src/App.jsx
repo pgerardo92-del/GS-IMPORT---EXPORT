@@ -20,7 +20,8 @@ export default function App() {
   const [receipts, setReceipts] = useState([]);
   const [allProfiles, setAllProfiles] = useState([]);
 
-  const [vistaActual, setVistaActual] = useState('activos'); // 'activos', 'reservados', o 'vendidos'
+  // 💡 Añadido 'todos' como opción predeterminada o seleccionable para stock total
+  const [vistaActual, setVistaActual] = useState('todos'); // 'todos', 'activos', 'reservados', o 'vendidos'
   const [orden, setOrden] = useState('recientes');
   const [selectedVehicleIds, setSelectedVehicleIds] = useState([]);
 
@@ -176,19 +177,20 @@ export default function App() {
       const activeRes = listaReservas.find(r => r.vehicle_id === car.id && ['activa', 'revision_pago', 'extendida'].includes(r.estado));
       const estaReservado = car.estado === 'reservado' || car.estado === 'seña_en_revision' || Boolean(activeRes);
 
+      // 💡 Reglas de filtrado por pestañas
       if (vista === 'activos' && estaReservado) return false;
       if (vista === 'reservados' && !estaReservado) return false;
+      // Si la vista es 'todos', incluye tanto activos como reservados (excluyendo vendidos que ya filtra Supabase)
 
       const matchMarca = currentFilters.marca === '' || (car.marca && car.marca.toLowerCase().includes(currentFilters.marca.toLowerCase()));
       const matchModelo = currentFilters.modelo === '' || (car.modelo && car.modelo.toLowerCase().includes(currentFilters.modelo.toLowerCase()));
       const matchAnio = currentFilters.anio === '' || String(car.anio).includes(currentFilters.anio);
       const matchChasis = currentFilters.chasis === '' || (car.vin_chasis && car.vin_chasis.toLowerCase().includes(currentFilters.chasis.toLowerCase()));
       
-      // 💡 Búsqueda mejorada para múltiples referencias (separadas por espacios, comas o saltos de línea)
       let matchRef = true;
       if (currentFilters.refNo && currentFilters.refNo.trim() !== '') {
         const refsBuscadas = currentFilters.refNo
-          .split(/[\s,]+/) // Divide por espacios o comas
+          .split(/[\s,]+/)
           .map(r => r.trim().toLowerCase())
           .filter(Boolean);
 
@@ -308,7 +310,6 @@ export default function App() {
     }
   }
 
-  // 💡 Función para extender de forma masiva las reservas de las unidades seleccionadas
   async function handleMasiveExtend() {
     if (!masiveFechaExt) return alert('Selecciona una fecha y hora válidas.');
     if (selectedVehicleIds.length === 0) return alert('No hay unidades seleccionadas.');
@@ -581,7 +582,7 @@ export default function App() {
 
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
           <h3 style={{ margin: 0 }}>
-            {vistaActual === 'activos' ? `🚗 UNIDADES DISPONIBLES (${filteredVehicles.length})` : vistaActual === 'reservados' ? `🔒 UNIDADES RESERVADAS (${filteredVehicles.length})` : `📁 HISTORIAL DE UNIDADES VENDIDAS (${filteredVehicles.length})`}
+            {vistaActual === 'todos' ? `🚗 STOCK TOTAL (${filteredVehicles.length})` : vistaActual === 'activos' ? `🟢 UNIDADES DISPONIBLES (${filteredVehicles.length})` : vistaActual === 'reservados' ? `🔒 UNIDADES RESERVADAS (${filteredVehicles.length})` : `📁 HISTORIAL DE UNIDADES VENDIDAS (${filteredVehicles.length})`}
           </h3>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
@@ -600,10 +601,17 @@ export default function App() {
               </select>
             </div>
 
+            {/* 💡 Pestañas de Filtro Actualizadas con 'Todos (Stock Total)' */}
             <div style={{ display: 'flex', background: '#e2e8f0', padding: 4, borderRadius: 8, gap: 4 }}>
               <button 
+                onClick={() => setVistaActual('todos')}
+                style={{ padding: '6px 14px', borderRadius: 6, border: 'none', background: vistaActual === 'todos' ? '#0f172a' : 'transparent', color: vistaActual === 'todos' ? '#fff' : '#475569', fontWeight: 600, cursor: 'pointer', fontSize: 13 }}
+              >
+                📦 Todos (Stock Total)
+              </button>
+              <button 
                 onClick={() => setVistaActual('activos')}
-                style={{ padding: '6px 14px', borderRadius: 6, border: 'none', background: vistaActual === 'activos' ? '#0f172a' : 'transparent', color: vistaActual === 'activos' ? '#fff' : '#475569', fontWeight: 600, cursor: 'pointer', fontSize: 13 }}
+                style={{ padding: '6px 14px', borderRadius: 6, border: 'none', background: vistaActual === 'activos' ? '#16a34a' : 'transparent', color: vistaActual === 'activos' ? '#fff' : '#475569', fontWeight: 600, cursor: 'pointer', fontSize: 13 }}
               >
                 🟢 Disponibles / Stock
               </button>
@@ -682,7 +690,6 @@ export default function App() {
                 {selectedVehicleIds.length} seleccionados
               </span>
 
-              {/* 💡 Botón exclusivo de Admin para Extender Masivamente las reservas seleccionadas */}
               {esAdmin && selectedVehicleIds.length > 0 && (
                 <button 
                   type="button"
@@ -927,7 +934,6 @@ export default function App() {
           })}
         </div>
 
-        {/* 💡 Modal para la extensión masiva de reservas (Admin) */}
         {showMasiveExtendModal && (
           <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}>
             <div style={{ background: '#fff', padding: 24, borderRadius: 12, width: '100%', maxWidth: 400 }}>
