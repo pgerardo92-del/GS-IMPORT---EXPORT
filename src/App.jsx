@@ -19,8 +19,10 @@ export default function App() {
   const [reservations, setReservations] = useState([]);
   const [receipts, setReceipts] = useState([]);
   const [allProfiles, setAllProfiles] = useState([]);
+  
+  // 💡 Estado para almacenar el historial de precios de los vehículos
+  const [historialPrecios, setHistorialPrecios] = useState([]);
 
-  // 💡 Añadido 'todos' como opción predeterminada o seleccionable para stock total
   const [vistaActual, setVistaActual] = useState('todos'); // 'todos', 'activos', 'reservados', o 'vendidos'
   const [orden, setOrden] = useState('recientes');
   const [selectedVehicleIds, setSelectedVehicleIds] = useState([]);
@@ -30,7 +32,6 @@ export default function App() {
   const [extendingResId, setExtendingResId] = useState(null);
   const [nuevaFechaExt, setNuevaFechaExt] = useState('');
 
-  // 💡 Estado para el modal de extensión masiva (Admin)
   const [showMasiveExtendModal, setShowMasiveExtendModal] = useState(false);
   const [masiveFechaExt, setMasiveFechaExt] = useState('');
 
@@ -141,6 +142,11 @@ export default function App() {
     if (rData) setReservations(rData || []);
     const { data: pData } = await supabase.from('payment_receipts').select('*, profiles!payment_receipts_vendedor_id_fkey(nombre, email)').order('subido_el', { ascending: false });
     if (pData) setReceipts(pData || []);
+    
+    // 💡 Cargar historial de precios
+    const { data: hData } = await supabase.from('historial_precios').select('*, profiles(nombre)').order('fecha', { ascending: false });
+    if (hData) setHistorialPrecios(hData || []);
+
     await loadVehiclesByView(vistaActual);
   }
 
@@ -177,10 +183,8 @@ export default function App() {
       const activeRes = listaReservas.find(r => r.vehicle_id === car.id && ['activa', 'revision_pago', 'extendida'].includes(r.estado));
       const estaReservado = car.estado === 'reservado' || car.estado === 'seña_en_revision' || Boolean(activeRes);
 
-      // 💡 Reglas de filtrado por pestañas
       if (vista === 'activos' && estaReservado) return false;
       if (vista === 'reservados' && !estaReservado) return false;
-      // Si la vista es 'todos', incluye tanto activos como reservados (excluyendo vendidos que ya filtra Supabase)
 
       const matchMarca = currentFilters.marca === '' || (car.marca && car.marca.toLowerCase().includes(currentFilters.marca.toLowerCase()));
       const matchModelo = currentFilters.modelo === '' || (car.modelo && car.modelo.toLowerCase().includes(currentFilters.modelo.toLowerCase()));
@@ -252,9 +256,14 @@ export default function App() {
     }
   }
 
+  // 💡 Función de Actualización con lógica de Historial de Precios y Descuento
   async function handleUpdateVehicle(e) {
     e.preventDefault();
     if (!editingCar) return;
+
+    const vehiculoOriginal = vehicles.find(v => v.id === editingCar.id);
+    const precioViejo = vehiculoOriginal ? parseFloat(vehiculoOriginal.precio) : 0;
+    const precioNuevo = parseFloat(editingCar.precio);
 
     const { error } = await supabase.from('vehicles').update({
       ref_no: editingCar.ref_no,
@@ -263,17 +272,31 @@ export default function App() {
       modelo: editingCar.modelo,
       anio: parseInt(editingCar.anio),
       color: editingCar.color,
-      precio: parseFloat(editingCar.precio),
+      precio: precioNuevo,
+      precio_anterior: precioViejo !== precioNuevo ? precioViejo : (vehiculoOriginal?.precio_anterior || null),
       imagen_url: editingCar.imagen_url
     }).eq('id', editingCar.id);
 
     if (error) {
       alert('Error al actualizar: ' + error.message);
-    } else {
-      setEditingCar(null);
-      loadAllData();
-      alert('¡Vehículo actualizado con éxito!');
+      return;
     }
+
+    // 💡 Si el precio bajó, guardamos un registro en la tabla 'historial_precios'
+    if (precioNuevo < precioViejo) {
+      const diferencia = precioViejo - precioNuevo;
+      await supabase.from('historial_precios').insert([{
+        vehiculo_id: editingCar.id,
+        precio_anterior: precioViejo,
+        precio_nuevo: precioNuevo,
+        diferencia: diferencia,
+        cambiado_por: profile.id
+      }]);
+    }
+
+    setEditingCar(null);
+    loadAllData();
+    alert('¡Vehículo actualizado con éxito!');
   }
 
   async function handlePublishVehicle(carId) {
@@ -601,7 +624,6 @@ export default function App() {
               </select>
             </div>
 
-            {/* 💡 Pestañas de Filtro Actualizadas con 'Todos (Stock Total)' */}
             <div style={{ display: 'flex', background: '#e2e8f0', padding: 4, borderRadius: 8, gap: 4 }}>
               <button 
                 onClick={() => setVistaActual('todos')}
@@ -735,6 +757,10 @@ export default function App() {
             const isExtending = extendingResId === (activeRes ? activeRes.id : null);
             const estaReservado = car.estado === 'reservado' || car.estado === 'seña_en_revision' || Boolean(activeRes);
 
+            // 💡 Verificamos si hubo baja de precio
+            const huboBaja = car.precio_anterior && car.precio < car.precio_anterior;
+            const ahorro = huboBaja ? car.precio_anterior - car.precio : 0;
+
             const ultimaReservaCaida = reservations.find(
               r => r.vehicle_id === car.id && 
                    r.vendedor_id === profile.id && 
@@ -754,6 +780,13 @@ export default function App() {
             return (
               <div key={car.id} style={{ background: '#fff', borderRadius: 10, overflow: 'hidden', border: isSelected ? '2px solid #2563eb' : '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', position: 'relative' }}>
                 
+                {/* 💡 Etiqueta visual de rebaja de precio */}
+                {huboBaja && (
+                  <span style={{ position: 'absolute', top: 10, right: 10, zIndex: 10, background: '#ef4444', color: '#fff', fontSize: 11, fontWeight: 'bold', padding: '4px 8px', borderRadius: 6, boxShadow: '0 2px 4px rgba(0,0,0,0.2)' }}>
+                    ¡Bajó ${ahorro.toLocaleString()}! 📉
+                  </span>
+                )}
+
                 <div style={{ position: 'absolute', top: 10, left: 10, zIndex: 10, background: 'rgba(0,0,0,0.6)', padding: '4px 8px', borderRadius: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
                   <input 
                     type="checkbox" 
@@ -782,7 +815,19 @@ export default function App() {
                       <span>VIN: {car.vin_chasis}</span>
                     </div>
                     <h4 style={{ margin: '6px 0' }}>{car.marca} {car.modelo} ({car.anio})</h4>
-                    <p style={{ margin: '0 0 6px', fontSize: 14 }}>Color: {car.color} — <strong>${car.precio.toLocaleString()}</strong></p>
+                    
+                    {/* 💡 Visualización de precios tachados y nuevos */}
+                    <div style={{ margin: '0 0 6px', fontSize: 14 }}>
+                      Color: {car.color} —{' '}
+                      {huboBaja && (
+                        <span style={{ textDecoration: 'line-through', color: '#94a3b8', marginRight: 6, fontSize: 13 }}>
+                          ${car.precio_anterior.toLocaleString()}
+                        </span>
+                      )}
+                      <strong style={{ color: huboBaja ? '#16a34a' : '#0f172a' }}>
+                        ${car.precio.toLocaleString()}
+                      </strong>
+                    </div>
                     
                     {esAdmin && (
                       <div style={{ fontSize: 12, color: '#2563eb', fontWeight: 'bold', marginBottom: 10, background: '#eff6ff', padding: '4px 8px', borderRadius: 4, display: 'inline-block' }}>
@@ -993,6 +1038,7 @@ export default function App() {
           </div>
         )}
 
+        {/* 💡 Modal de Detalles con Historial de Precios integrado para Admins */}
         {selectedCarDetail && (
           <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}>
             <div style={{ background: '#fff', padding: 24, borderRadius: 12, width: '100%', maxWidth: 500, maxHeight: '90vh', overflowY: 'auto' }}>
@@ -1011,16 +1057,36 @@ export default function App() {
                 <div><strong>Nro. Referencia:</strong> {selectedCarDetail.ref_no || 'N/D'}</div>
                 <div><strong>VIN / Chasis:</strong> {selectedCarDetail.vin_chasis}</div>
                 <div><strong>Color:</strong> {selectedCarDetail.color}</div>
-                <div><strong>Precio:</strong> ${selectedCarDetail.precio.toLocaleString()}</div>
+                <div><strong>Precio Actual:</strong> ${selectedCarDetail.precio.toLocaleString()}</div>
                 <div style={{ gridColumn: '1 / -1' }}><strong>Estado Actual:</strong> {selectedCarDetail.estado.toUpperCase().replaceAll('_', ' ')}</div>
                 {esAdmin && (
                   <div style={{ gridColumn: '1 / -1' }}><strong>Tiempo en Stock:</strong> {calcularDiasEnStock(selectedCarDetail.creado_el)}</div>
                 )}
               </div>
 
-              {profile.rol === 'admin' && (
+              {/* 💡 Sección de Historial de Precios para Admins */}
+              {esAdmin && (
+                <div style={{ marginBottom: 16 }}>
+                  <h4 style={{ margin: '0 0 8px', borderBottom: '2px solid #e2e8f0', paddingBottom: 4 }}>📉 Historial de Cambios de Precio</h4>
+                  {historialPrecios.filter(h => h.vehiculo_id === selectedCarDetail.id).length === 0 ? (
+                    <p style={{ fontSize: 13, color: '#64748b' }}>Este vehículo no registra cambios de precio previos.</p>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {historialPrecios.filter(h => h.vehiculo_id === selectedCarDetail.id).map(hist => (
+                        <div key={hist.id} style={{ background: '#fef2f2', padding: 10, borderRadius: 6, border: '1px solid #fecaca', fontSize: 13 }}>
+                          <div><strong>Precio anterior:</strong> <span style={{ textDecoration: 'line-through' }}>${hist.precio_anterior.toLocaleString()}</span> ➔ <strong>Nuevo:</strong> <span style={{ color: '#16a34a' }}>${hist.precio_nuevo.toLocaleString()}</span></div>
+                          <div style={{ color: '#dc2626', fontWeight: 'bold', marginTop: 2 }}>Descuento / Baja: -${hist.diferencia.toLocaleString()}</div>
+                          <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>Modificado por: {hist.profiles?.nombre || 'Administrador'} el {new Date(hist.fecha).toLocaleString()}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {esAdmin && (
                 <div>
-                  <h4 style={{ margin: '0 0 8px', borderBottom: '2px solid #e2e8f0', paddingBottom: 4 }}>📋 Historial de Reservas (Solo Admins)</h4>
+                  <h4 style={{ margin: '0 0 8px', borderBottom: '2px solid #e2e8f0', paddingBottom: 4 }}>📋 Historial de Reservas</h4>
                   {reservations.filter(r => r.vehicle_id === selectedCarDetail.id).length === 0 ? (
                     <p style={{ fontSize: 13, color: '#64748b' }}>Este vehículo no registra reservas anteriores.</p>
                   ) : (
