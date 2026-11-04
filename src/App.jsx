@@ -20,10 +20,9 @@ export default function App() {
   const [receipts, setReceipts] = useState([]);
   const [allProfiles, setAllProfiles] = useState([]);
   
-  // 💡 Estado para almacenar el historial de precios de los vehículos
   const [historialPrecios, setHistorialPrecios] = useState([]);
 
-  const [vistaActual, setVistaActual] = useState('todos'); // 'todos', 'activos', 'reservados', o 'vendidos'
+  const [vistaActual, setVistaActual] = useState('todos'); 
   const [orden, setOrden] = useState('recientes');
   const [selectedVehicleIds, setSelectedVehicleIds] = useState([]);
 
@@ -143,7 +142,6 @@ export default function App() {
     const { data: pData } = await supabase.from('payment_receipts').select('*, profiles!payment_receipts_vendedor_id_fkey(nombre, email)').order('subido_el', { ascending: false });
     if (pData) setReceipts(pData || []);
     
-    // 💡 Cargar historial de precios
     const { data: hData } = await supabase.from('historial_precios').select('*, profiles(nombre)').order('fecha', { ascending: false });
     if (hData) setHistorialPrecios(hData || []);
 
@@ -180,8 +178,14 @@ export default function App() {
 
   function aplicarFiltrosLocales(listaVehiculos, listaReservas, vista, currentFilters, currentOrden) {
     let resultado = listaVehiculos.filter(car => {
-      const activeRes = listaReservas.find(r => r.vehicle_id === car.id && ['activa', 'revision_pago', 'extendida'].includes(r.estado));
-      const estaReservado = car.estado === 'reservado' || car.estado === 'seña_en_revision' || Boolean(activeRes);
+      const activeRes = listaReservas.find(r => {
+        if (r.vehicle_id !== car.id) return false;
+        if (!['activa', 'revision_pago', 'extendida'].includes(r.estado)) return false;
+        if (new Date(r.fecha_limite) <= new Date()) return false;
+        return true;
+      });
+
+      const estaReservado = Boolean(activeRes);
 
       if (vista === 'activos' && estaReservado) return false;
       if (vista === 'reservados' && !estaReservado) return false;
@@ -217,7 +221,7 @@ export default function App() {
   async function checkExpiredReservations(now) {
     if (reservations.length === 0) return;
     for (const res of reservations) {
-      if (['activa', 'extendida'].includes(res.estado) && new Date(res.fecha_limite) <= now) {
+      if (['activa', 'extendida', 'revision_pago'].includes(res.estado) && new Date(res.fecha_limite) <= now) {
         await supabase.from('reservations').update({ estado: 'vencida' }).eq('id', res.id);
         await supabase.from('vehicles').update({ estado: 'disponible' }).eq('id', res.vehicle_id);
         
@@ -256,7 +260,6 @@ export default function App() {
     }
   }
 
-  // 💡 Función de Actualización con lógica de Historial de Precios y Descuento
   async function handleUpdateVehicle(e) {
     e.preventDefault();
     if (!editingCar) return;
@@ -282,7 +285,6 @@ export default function App() {
       return;
     }
 
-    // 💡 Si el precio bajó, guardamos un registro en la tabla 'historial_precios'
     if (precioNuevo < precioViejo) {
       const diferencia = precioViejo - precioNuevo;
       await supabase.from('historial_precios').insert([{
@@ -398,7 +400,7 @@ export default function App() {
     
     const rows = autosAExportar.map(car => {
       const activeRes = reservations.find(r => r.vehicle_id === car.id && ['activa', 'revision_pago', 'extendida'].includes(r.estado));
-      const estaReservado = car.estado === 'reservado' || car.estado === 'seña_en_revision' || Boolean(activeRes);
+      const estaReservado = Boolean(activeRes && new Date(activeRes.fecha_limite) > new Date());
       
       let estadoTexto = 'DISPONIBLE';
       if (car.estado === 'vendido') {
@@ -441,7 +443,7 @@ export default function App() {
     const ultimaReservaCaida = reservations.find(
       r => r.vehicle_id === selectedCar.id && 
            r.vendedor_id === profile.id && 
-           ['vencida', 'cancelada_por_vendedor', 'cancelada_por_admin'].includes(r.estado)
+           ['vencida', 'cancelada', 'cancelada_por_admin'].includes(r.estado)
     );
 
     if (ultimaReservaCaida) {
@@ -492,25 +494,60 @@ export default function App() {
     loadAllData();
   }
 
+  // 💡 FUNCIÓN CORREGIDA USANDO 'cancelada' (Compatible con el Enum de Supabase)
   async function handleCancelMyReservation(reservationId, carId) {
     if (!confirm('¿Estás seguro de anular esta reserva? El vehículo volverá a estar disponible para los demás vendedores.')) return;
-    await supabase.from('reservations').update({ estado: 'cancelada_por_vendedor' }).eq('id', reservationId);
-    await supabase.from('vehicles').update({ estado: 'disponible' }).eq('id', carId);
+
+    let targetResId = reservationId;
+    if (!targetResId) {
+      const resActivaEncontrada = reservations.find(r => r.vehicle_id === carId && ['activa', 'revision_pago', 'extendida'].includes(r.estado));
+      if (resActivaEncontrada) targetResId = resActivaEncontrada.id;
+    }
+
+    if (!targetResId) {
+      return alert('No se encontró una reserva activa para anular en esta unidad.');
+    }
+
+    const { error: errRes } = await supabase
+      .from('reservations')
+      .update({ estado: 'cancelada' })
+      .eq('id', targetResId);
+
+    if (errRes) {
+      console.error("Error al anular reserva:", errRes);
+      return alert('Error al anular la reserva: ' + errRes.message);
+    }
+
+    const { error: errCar } = await supabase
+      .from('vehicles')
+      .update({ estado: 'disponible' })
+      .eq('id', carId);
+
+    if (errCar) {
+      console.error("Error al liberar vehículo:", errCar);
+      return alert('La reserva se anuló, pero hubo un error al liberar el vehículo en el stock.');
+    }
+
+    setReservations(prev => prev.map(r => r.id === targetResId ? {...r, estado: 'cancelada'} : r));
+    setVehicles(prev => prev.map(v => v.id === carId ? {...v, estado: 'disponible'} : v));
 
     const vehiculoAfectado = vehicles.find(v => v.id === carId);
     if (vehiculoAfectado) {
       await sincronizarConGoogleSheets(vehiculoAfectado.ref_no, 'disponible', '', '');
     }
 
-    loadAllData();
-    alert('Reserva anulada correctamente. El vehículo ya está disponible en el stock.');
+    await loadAllData();
+    alert('¡Reserva anulada correctamente! El vehículo ya está disponible en el stock.');
   }
 
   async function handleAdminCancelReservation(reservationId, carId) {
     if (!confirm('⚠️ [ADMIN] ¿Estás seguro de dar de baja la reserva activa de este vendedor? El vehículo volverá a estar disponible inmediatamente.')) return;
     
-    await supabase.from('reservations').update({ estado: 'cancelada_por_admin' }).eq('id', reservationId);
+    await supabase.from('reservations').update({ estado: 'cancelada' }).eq('id', reservationId);
     await supabase.from('vehicles').update({ estado: 'disponible' }).eq('id', carId);
+
+    setReservations(prev => prev.map(r => r.id === reservationId ? {...r, estado: 'cancelada'} : r));
+    setVehicles(prev => prev.map(v => v.id === carId ? {...v, estado: 'disponible'} : v));
 
     const vehiculoAfectado = vehicles.find(v => v.id === carId);
     if (vehiculoAfectado) {
@@ -526,6 +563,8 @@ export default function App() {
     if (nuevoEstado === 'disponible') {
       await supabase.from('reservations').update({ estado: 'cancelada' }).eq('vehicle_id', carId).in('estado', ['activa', 'revision_pago', 'extendida']);
     }
+
+    setVehicles(prev => prev.map(v => v.id === carId ? {...v, estado: nuevoEstado} : v));
 
     const vehiculoAfectado = vehicles.find(v => v.id === carId);
     if (vehiculoAfectado) {
@@ -752,19 +791,24 @@ export default function App() {
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 16 }}>
           {filteredVehicles.map(car => {
-            const activeRes = reservations.find(r => r.vehicle_id === car.id && ['activa', 'revision_pago', 'extendida'].includes(r.estado));
+            const activeRes = reservations.find(r => {
+              if (r.vehicle_id !== car.id) return false;
+              if (!['activa', 'revision_pago', 'extendida'].includes(r.estado)) return false;
+              if (new Date(r.fecha_limite) <= currentTime) return false;
+              return true;
+            });
+
             const isSelected = selectedVehicleIds.includes(car.id);
             const isExtending = extendingResId === (activeRes ? activeRes.id : null);
-            const estaReservado = car.estado === 'reservado' || car.estado === 'seña_en_revision' || Boolean(activeRes);
+            const estaReservado = Boolean(activeRes);
 
-            // 💡 Verificamos si hubo baja de precio
-            const huboBaja = car.precio_anterior && car.precio < car.precio_anterior;
-            const ahorro = huboBaja ? car.precio_anterior - car.precio : 0;
+            const huboBaja = car.precio_anterior && Number(car.precio) < Number(car.precio_anterior);
+            const ahorro = huboBaja ? Number(car.precio_anterior) - Number(car.precio) : 0;
 
             const ultimaReservaCaida = reservations.find(
               r => r.vehicle_id === car.id && 
                    r.vendedor_id === profile.id && 
-                   ['vencida', 'cancelada_por_vendedor', 'cancelada_por_admin'].includes(r.estado)
+                   ['vencida', 'cancelada', 'cancelada_por_admin'].includes(r.estado)
             );
 
             let estaPenalizadoEnUnidad = false;
@@ -780,7 +824,6 @@ export default function App() {
             return (
               <div key={car.id} style={{ background: '#fff', borderRadius: 10, overflow: 'hidden', border: isSelected ? '2px solid #2563eb' : '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', position: 'relative' }}>
                 
-                {/* 💡 Etiqueta visual de rebaja de precio */}
                 {huboBaja && (
                   <span style={{ position: 'absolute', top: 10, right: 10, zIndex: 10, background: '#ef4444', color: '#fff', fontSize: 11, fontWeight: 'bold', padding: '4px 8px', borderRadius: 6, boxShadow: '0 2px 4px rgba(0,0,0,0.2)' }}>
                     ¡Bajó ${ahorro.toLocaleString()}! 📉
@@ -816,16 +859,15 @@ export default function App() {
                     </div>
                     <h4 style={{ margin: '6px 0' }}>{car.marca} {car.modelo} ({car.anio})</h4>
                     
-                    {/* 💡 Visualización de precios tachados y nuevos */}
                     <div style={{ margin: '0 0 6px', fontSize: 14 }}>
                       Color: {car.color} —{' '}
                       {huboBaja && (
                         <span style={{ textDecoration: 'line-through', color: '#94a3b8', marginRight: 6, fontSize: 13 }}>
-                          ${car.precio_anterior.toLocaleString()}
+                          ${Number(car.precio_anterior).toLocaleString()}
                         </span>
                       )}
                       <strong style={{ color: huboBaja ? '#16a34a' : '#0f172a' }}>
-                        ${car.precio.toLocaleString()}
+                        ${Number(car.precio).toLocaleString()}
                       </strong>
                     </div>
                     
@@ -852,13 +894,13 @@ export default function App() {
                     </button>
                   )}
 
-                  {!esVendedor && activeRes && (
+                  {activeRes && (activeRes.vendedor_id === profile.id || esAdmin) && (
                     <div style={{ background: '#fffbeb', border: '1px solid #fde68a', padding: 10, borderRadius: 8, fontSize: 13, marginBottom: 12 }}>
                       <div><strong>Vendedor/a:</strong> {activeRes.profiles?.nombre}</div>
                       <div><strong>Cliente:</strong> {activeRes.cliente_nombre}</div>
                       <div style={{ color: '#dc2626', fontWeight: 700, marginTop: 4, marginBottom: 6 }}>⏱ {formatTimeRemaining(activeRes.fecha_limite)}</div>
                       
-                      {profile.rol === 'admin' && (
+                      {esAdmin && (
                         <div>
                           {!isExtending ? (
                             <button 
@@ -911,7 +953,7 @@ export default function App() {
                   <div>
                     {vistaActual !== 'vendidos' && (
                       <>
-                        {profile.rol === 'admin' && !car.publicado_para_venta && (
+                        {esAdmin && !car.publicado_para_venta && (
                           <button onClick={() => handlePublishVehicle(car.id)} style={{ width: '100%', padding: 10, background: '#2563eb', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', marginBottom: 8 }}>🚀 Habilitar Venta</button>
                         )}
                         
@@ -923,7 +965,7 @@ export default function App() {
                             🔒 UNIDAD RESERVADA
                           </button>
                         ) : (
-                          car.estado === 'disponible' && car.publicado_para_venta && profile.rol !== 'stock_manager' && (
+                          car.publicado_para_venta && profile.rol !== 'stock_manager' && (
                             <button 
                               onClick={() => setSelectedCar(car)} 
                               disabled={estaPenalizadoEnUnidad}
@@ -945,7 +987,7 @@ export default function App() {
                           )
                         )}
                         
-                        {activeRes && (activeRes.vendedor_id === profile.id || profile.rol === 'admin') && (
+                        {activeRes && (activeRes.vendedor_id === profile.id || esAdmin) && (
                           <button onClick={() => setSelectedReservation(activeRes)} style={{ width: '100%', padding: 10, background: '#d97706', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', marginBottom: 6 }}>📎 Subir Transferencia</button>
                         )}
 
@@ -955,7 +997,7 @@ export default function App() {
                       </>
                     )}
 
-                    {profile.rol === 'admin' && (
+                    {esAdmin && (
                       <div style={{ display: 'flex', gap: 8, marginTop: 4, flexDirection: 'column' }}>
                         <div style={{ display: 'flex', gap: 8, flexDirection: 'column' }}>
                           {car.estado === 'vendido' ? (
@@ -1038,7 +1080,6 @@ export default function App() {
           </div>
         )}
 
-        {/* 💡 Modal de Detalles con Historial de Precios integrado para Admins */}
         {selectedCarDetail && (
           <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}>
             <div style={{ background: '#fff', padding: 24, borderRadius: 12, width: '100%', maxWidth: 500, maxHeight: '90vh', overflowY: 'auto' }}>
@@ -1057,17 +1098,16 @@ export default function App() {
                 <div><strong>Nro. Referencia:</strong> {selectedCarDetail.ref_no || 'N/D'}</div>
                 <div><strong>VIN / Chasis:</strong> {selectedCarDetail.vin_chasis}</div>
                 <div><strong>Color:</strong> {selectedCarDetail.color}</div>
-                <div><strong>Precio Actual:</strong> ${selectedCarDetail.precio.toLocaleString()}</div>
+                <div><strong>Precio Actual:</strong> ${Number(selectedCarDetail.precio).toLocaleString()}</div>
                 <div style={{ gridColumn: '1 / -1' }}><strong>Estado Actual:</strong> {selectedCarDetail.estado.toUpperCase().replaceAll('_', ' ')}</div>
                 {esAdmin && (
-                  <div style={{ gridColumn: '1 / -1' }}><strong>Tiempo en Stock:</strong> {calcularDiasEnStock(selectedCarDetail.creado_el)}</div>
+                  <div style={{ gridColumn: '1 / -1' }}><strong>Tiempo in Stock:</strong> {calcularDiasEnStock(selectedCarDetail.creado_el)}</div>
                 )}
               </div>
 
-              {/* 💡 Sección de Historial de Precios para Admins */}
               {esAdmin && (
                 <div style={{ marginBottom: 16 }}>
-                  <h4 style={{ margin: '0 0 8px', borderBottom: '2px solid #e2e8f0', paddingBottom: 4 }}>📉 Historial de Cambios de Precio</h4>
+                  <h4 style={{ margin: '0 0 8px', borderBottom: '2px solid #e2e8f0', paddingBottom: 4 }}>📉 Historial de Cambios de Precio (Solo Admins)</h4>
                   {historialPrecios.filter(h => h.vehiculo_id === selectedCarDetail.id).length === 0 ? (
                     <p style={{ fontSize: 13, color: '#64748b' }}>Este vehículo no registra cambios de precio previos.</p>
                   ) : (
@@ -1091,14 +1131,25 @@ export default function App() {
                     <p style={{ fontSize: 13, color: '#64748b' }}>Este vehículo no registra reservas anteriores.</p>
                   ) : (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                      {reservations.filter(r => r.vehicle_id === selectedCarDetail.id).map(hist => (
-                        <div key={hist.id} style={{ background: '#f1f5f9', padding: 10, borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 13 }}>
-                          <div><strong>Vendedor/a:</strong> {hist.profiles?.nombre || 'N/D'} ({hist.profiles?.email || 'N/D'})</div>
-                          <div><strong>Cliente:</strong> {hist.cliente_nombre} (CI/RUC: {hist.cliente_doc})</div>
-                          <div><strong>Estado de Reserva:</strong> <span style={{ color: hist.estado === 'vencida' ? '#dc2626' : '#16a34a', fontWeight: 'bold' }}>{hist.estado.toUpperCase()}</span></div>
-                          <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>Iniciado el: {new Date(hist.fecha_inicio).toLocaleString()}</div>
-                        </div>
-                      ))}
+                      {reservations.filter(r => r.vehicle_id === selectedCarDetail.id).map(hist => {
+                        let textoFechaLimite = '';
+                        const fechaLimiteObj = new Date(hist.fecha_limite);
+                        if (['vencida', 'cancelada', 'cancelada_por_admin'].includes(hist.estado)) {
+                          textoFechaLimite = `Cayó / Venció el: ${fechaLimiteObj.toLocaleString()}`;
+                        } else {
+                          textoFechaLimite = `Vence el: ${fechaLimiteObj.toLocaleString()}`;
+                        }
+
+                        return (
+                          <div key={hist.id} style={{ background: '#f1f5f9', padding: 10, borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 13 }}>
+                            <div><strong>Vendedor/a:</strong> {hist.profiles?.nombre || 'N/D'} ({hist.profiles?.email || 'N/D'})</div>
+                            <div><strong>Cliente:</strong> {hist.cliente_nombre} (CI/RUC: {hist.cliente_doc})</div>
+                            <div><strong>Estado de Reserva:</strong> <span style={{ color: hist.estado === 'vencida' ? '#dc2626' : '#16a34a', fontWeight: 'bold' }}>{hist.estado.toUpperCase()}</span></div>
+                            <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>Iniciado el: {new Date(hist.fecha_inicio).toLocaleString()}</div>
+                            <div style={{ fontSize: 11, color: '#b91c1c', marginTop: 2, fontWeight: 'bold' }}>{textoFechaLimite}</div>
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
